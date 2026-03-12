@@ -1,0 +1,944 @@
+---
+title: "Trait GxE Models"
+author: "Alayna Mead"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    toc: true
+    number_sections: true
+    highlight: rstudio
+---
+
+Tests for GxE effects on phenotypic traits. Unlike variance partitioning script, here we test the effects of specific climate and genetic variables.
+
+Environment (E): garden MAT and MAP (for year of collection)
+
+Genotype (G): Home MAT and MAP, genetic PCs 1-3
+
+Genotype x Environment interaction (GxE): all possible combinations of G and E variables above
+
+# Setup
+
+```{r setup}
+
+library(ggplot2)
+library(lme4)
+library(sjPlot) # model plots
+library(circlize) # colorramp2
+library(ComplexHeatmap)
+library(effectsize) # standardize_parameters to standardize model coefficients
+library(car) # Anova function
+library(knitr) # kable() for tables
+
+
+# load data
+load('data/clean/mini_garden_phenotypic_and_climate_data_2021-2024.Rdata')
+
+
+# set negative heights to NA
+dat$GrowthIncrement_2024[dat$GrowthIncrement_2024 < 0] <- NA
+dat$GrowthIncrement_2023[dat$GrowthIncrement_2023 < 0] <- NA
+dat$GrowthIncrement_2022[dat$GrowthIncrement_2022 < 0] <- NA
+dat$GrowthIncrement_2021[dat$GrowthIncrement_2021 < 0] <- NA
+
+# remove NA genotypes and those without genetic info
+dat <- dat[! is.na(dat$Genotype),]
+dat <- dat[! is.na(dat$k2_tricho),]
+
+
+# print session info, including package versions
+sessionInfo()
+
+```
+
+```{r markdown_settings}
+
+# markdown settings
+knitr::opts_chunk$set(fig.width = 10, fig.height = 8)
+
+```
+
+```{r setup_ggplot}
+
+# ggplot settings
+theme_set(theme_bw(base_size = 16))
+
+```
+
+## Functions for plotting 
+
+```{r plot_function}
+
+# function to plot GxE interaction 
+# plot genetics/climate vs trait, separate panel for each garden
+plot_int <- function(trait, genetics, env, dat){
+  
+  dat$garden_sort <- reorder(dat$garden, dat[,env])
+  
+    p <- ggplot(data = dat, aes_string(x = genetics, y = trait, color = 'k2_tricho'))+
+    geom_point(na.rm = TRUE) +
+    scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+    geom_smooth(method = lm, col = 'black', na.rm = TRUE)+
+    facet_wrap(~garden_sort, drop = T) +
+    ggtitle(paste(genetics, ' ~ ', trait,  '\n', 'gardens sorted by ', env, sep = ''))
+  
+  plot(p)
+  
+}
+
+
+# plot variation in trait across gardens, sorting them by garden climate
+# boxplot by garden
+# use when the only variable is garden climate
+
+plot_env <- function(trait, env, dat){
+  
+  dat$garden_sort <- reorder(dat$garden, dat[,env])
+  #print(dat$garden_sort)
+  
+      p <- ggplot(data = dat, aes_string(x = 'garden_sort', y = trait))+
+    geom_boxplot()+
+    geom_jitter(na.rm = TRUE, aes(color = k2_tricho)) +
+    scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+    ggtitle(paste('garden ~ ', trait,  '\n', 'gardens sorted by ', env, sep = '')) +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+    
+  plot(p)
+  
+}
+
+
+```
+
+
+# Test for GxE effects on traits
+
+Run each year separately, because we want to use the garden climate for the year of collection
+
+## 2023 data
+
+### Setup
+
+```{r stats_setup_2023}
+
+###############################################
+
+# all vars measured in 2023
+vars <- c("DOY_Stage2_2023", "Stage2_cGDD_2023", "DOY_Stage3_2023", "Stage3_cGDD_2023",  "DOY_Stage6_2023", "daylength_Stage6_2023", "DOY_Stage7_2023", "daylength_Stage7_2023", "DOY_last_budset_2023", "daylength_last_budset_2023", "stage7_presence_2023", "growing_season_days_2023", 
+             "leaf_thickness_avg_mm_2023", "leaf_area_cm2_2023", "leaf_mass_g_2023", "LMA_g_m2_2023", "lower_stomata_pore_length_mean_um", "upper_stomata_pore_length_mean_um", "lower_stomata_density_mm2", "upper_stomata_density_mm2", "stomata_ratio", "upper_stomata_presence", 
+            "licor_gsw", "licor_gbw", "licor_ETR", "licor_Fs", "licor_Fm.", "licor_PhiPS2")
+
+###############################################
+
+# setup variables and put into a dataframe
+
+# set climate and phenotype variables
+garden_MAT <- dat$garden_MAT_2023
+garden_MAT_2 <- dat$garden_MAT_2023^2
+home_MAT <- dat$provenance_MAT
+home_MAT_2 <- dat$provenance_MAT^2
+garden_MAP <- dat$garden_MAP_2023
+garden_MAP_2 <- dat$garden_MAP_2023^2
+home_MAP <- dat$provenance_MAP
+home_MAP_2 <- dat$provenance_MAP^2
+home_lat <- dat$provenance_latitude
+garden_lat <- dat$garden_Latitude
+
+# random effects
+block <- as.character(interaction(dat$MiniCG_Site, dat$block, drop = T))
+#block <- as.character(dat$block)
+Pt <- dat$Pt
+k2_tricho <- dat$k2_tricho
+genotype <- as.character(dat$Genotype)
+garden <- as.character(dat$MiniCG_Site)
+genetic_PC1 <- dat$genetic_PC1
+genetic_PC2 <- dat$genetic_PC2
+genetic_PC3 <- dat$genetic_PC3
+
+# put in df
+df <- data.frame(dat[,vars], garden_MAT, garden_MAT_2, home_MAT, home_MAT_2, garden_MAP, garden_MAP_2, home_MAP, home_MAP_2, home_lat, garden_lat, Pt, k2_tricho, genotype, garden, block, genetic_PC1, genetic_PC2, genetic_PC3)
+rownames(df) <- dat$Unique_ID
+str(df)
+
+
+```
+
+
+### Models
+
+```{r model_with_all_vars_2023}
+
+# run full model for all variables
+vars <- c("DOY_Stage2_2023", "Stage2_cGDD_2023", "DOY_Stage3_2023", "Stage3_cGDD_2023",  "DOY_Stage6_2023", "DOY_Stage7_2023", "DOY_last_budset_2023", "stage7_presence_2023", "growing_season_days_2023", 
+             "leaf_thickness_avg_mm_2023", "leaf_area_cm2_2023", "leaf_mass_g_2023", "LMA_g_m2_2023", "lower_stomata_pore_length_mean_um", "upper_stomata_pore_length_mean_um", "lower_stomata_density_mm2", "upper_stomata_density_mm2", "stomata_ratio", "upper_stomata_presence", 
+            "licor_gsw", "licor_gbw", "licor_ETR", "licor_Fs", "licor_Fm.", "licor_PhiPS2")
+
+
+
+dput(vars)
+
+# the binary variables won't converge
+# Error: (maxstephalfit) PIRLS step-halvings failed to reduce deviance in pwrssUpdate
+
+vars <- c("DOY_Stage2_2023", "Stage2_cGDD_2023", "DOY_Stage3_2023", "Stage3_cGDD_2023",  "DOY_Stage6_2023", "daylength_Stage6_2023", "DOY_Stage7_2023", "daylength_Stage7_2023", "DOY_last_budset_2023", "daylength_last_budset_2023",  "growing_season_days_2023", 
+             "leaf_thickness_avg_mm_2023", "leaf_area_cm2_2023", "leaf_mass_g_2023", "LMA_g_m2_2023", "lower_stomata_pore_length_mean_um", "upper_stomata_pore_length_mean_um", "lower_stomata_density_mm2", "upper_stomata_density_mm2", "stomata_ratio", 
+            "licor_gsw", "licor_gbw", "licor_ETR", "licor_Fs", "licor_Fm.", "licor_PhiPS2")
+
+# binary variables
+vars_bin <- c( "stage7_presence_2023", "upper_stomata_presence")
+
+mods.23 <- list()
+
+for(n in 1:length(vars)){
+  
+  var <- vars[n]
+  
+  print(paste('Model for:', var))
+  
+  if(var %in% vars_bin){
+
+    # these models failed to converge - don't run here
+    # mod <- glm(paste0(var, '~ garden_MAT*home_MAT + garden_MAT*home_MAP +   garden_MAP*home_MAP + garden_MAP*home_MAT + genetic_PC1*garden_MAT + genetic_PC2*garden_MAT + genetic_PC3*garden_MAT +  genetic_PC1*garden_MAP + genetic_PC2*garden_MAP + genetic_PC3*garden_MAP + (1 | genotype) + (1 | garden/block) '),
+    #             data = df,
+    #             family = binomial()
+    # )
+
+
+  } else {
+    #  full model with just linear interaction effects
+    mod <- lmer(paste0(var, '~ garden_MAT*home_MAT + garden_MAT*home_MAP +   garden_MAP*home_MAP + garden_MAP*home_MAT + genetic_PC1*garden_MAT + genetic_PC2*garden_MAT + genetic_PC3*garden_MAT +  genetic_PC1*garden_MAP + genetic_PC2*garden_MAP + genetic_PC3*garden_MAP + (1 | genotype) + (1 | garden/block)'),
+                data = df
+    )
+  }
+    summary(mod)
+    mod.info <- car::Anova(mod)
+    
+    print(mod.info)
+    
+    # save to list
+    mods.23[[n]] <- mod
+    
+    # plot model effects
+    p <- plot_model(mod, type = 'std', vline.color = "black", show.values = T, title = var)
+    plot(p)
+    
+    # plots for significant factors
+    pvals <- mod.info$`Pr(>Chisq)`
+    if(min(pvals) <= 0.05){
+      
+      # get significant factors
+      sig <- rownames(mod.info)[pvals <= 0.05]
+      
+      # plot for each significant factor
+      for(f in 1:length(sig)){
+        
+        y <- var # y axis is always the trait
+        
+        # if it is an interaction effect, we need to include both variables in the plot
+        if(grepl(':', sig[f])){
+          
+          # get two variables in interaction
+          interaction_vars <- strsplit(sig[f], ':')[[1]]
+          
+          # env will start with 'garden' because it's always garden climate
+          env <- grep('garden', interaction_vars, value = T)
+          # the one without garden is the genetic effect, either PCs or home clim
+          x <- grep('garden', interaction_vars, value = T, invert = T)
+          
+          p2 <- plot_int(trait = y, genetics = x, env = env, dat = df)
+          #plot(p2)
+          
+          # if just a single variable, still plot gardens separately, but sort by MAT by default
+        } else{
+          
+          # if single variable is garden climate, use that and plot boxplots
+          if(grepl('garden', sig[f])){
+            env <- sig[f]
+            plot_env(trait = y, env = env, dat = df)
+            
+          # if single variable is a genotype characteristic, facet by garden sorted by MAT  
+          } else {
+            env <- 'garden_MAT'
+          x <- sig[f]
+           p2 <- plot_int(trait = y, genetics = x, env = env, dat = df)
+          #plot(p2)
+          }
+        }
+      }
+    }
+}
+
+# plot all model effects together
+# there are really too many variables for this to be useful
+#plot_models(mods.23,std.est = T, m.labels = vars, p.shape = T, spacing = 1, vline.color = 'black', colors = cols25())
+
+names(mods.23) <- vars
+
+# setup dfs for effect sizes and p-values of each factor
+# use last full model run in loop to get effect names - models in mods object have some effects reduced
+rows <- names(fixef(mod))[-1] # names of fixed effects, minus intercept
+# reorder row so garden clim is first
+rows <- rows[c(1,4,2,3,5:17)]
+
+colms <- vars
+
+# effect size
+df.eff.23 <- as.data.frame(matrix(ncol = length(colms), nrow = length(rows)))
+colnames(df.eff.23) <- colms
+rownames(df.eff.23) <- rows
+# standardized effect size
+df.eff.std.23 <- as.data.frame(matrix(ncol = length(colms), nrow = length(rows)))
+colnames(df.eff.std.23) <- colms
+rownames(df.eff.std.23) <- rows
+# p values
+df.pval.23 <- as.data.frame(matrix(ncol = length(colms), nrow = length(rows)))
+colnames(df.pval.23) <- colms
+rownames(df.pval.23) <- rows
+# p values
+df.pval.all.23 <- as.data.frame(matrix(ncol = length(colms), nrow = length(rows)))
+colnames(df.pval.all.23) <- colms
+rownames(df.pval.all.23) <- rows
+
+
+# get p-values and effect sizes for each variable
+
+for(n in 1:length(vars)){
+  
+  var <- vars[[n]]
+  mod <- mods.23[[n]]
+  # model info
+  mod.info <- car::Anova(mod)
+  # standardize coefficients
+  eff.std <- effectsize::standardize_parameters(mod)
+  
+  # fixed effects, minus intercept
+  #fes <- names(fixef(mod)[-1])
+  # reorder so garden climates are first
+  fes <- rownames(mod.info)
+  
+  # get their p-values and effect sizes for each fixed effect
+    for(f in 1:length(fes)){
+      
+      fe <- fes[[f]]
+      
+      # check for significance
+      pval <- mod.info[fe, 'Pr(>Chisq)']
+      
+      if(pval <= 0.05){
+        df.eff.23[fe, var] <- fixef(mods.23[[var]])[fe]
+        df.eff.std.23[fe,var] <- eff.std[eff.std$Parameter == fe, 'Std_Coefficient']
+        df.pval.23[fe, var] <- mod.info[fe, 'Pr(>Chisq)']
+      }
+  }
+}
+
+# get all pvalues so they can be adjusted
+for(n in 1:length(vars)){
+  
+  var <- vars[[n]]
+  mod <- mods.23[[n]]
+  #mod.info <- summary(mod)
+  mod.info <- car::Anova(mod)
+
+  # loop through retained variables and get their p-values and effect sizes
+    for(f in 1:nrow(df.pval.all.23)){
+      
+      fe <- rownames(df.pval.all.23)[f]
+      # get pval 
+         df.pval.all.23[fe, var] <- mod.info[fe, 'Pr(>Chisq)']
+         
+  }
+}
+
+# adjust pvals
+padj <- p.adjust(unlist(df.pval.all.23), method = 'BH')
+df.pval.adj.23 <- as.data.frame(matrix(padj, ncol = ncol(df.pval.all.23)))
+colnames(df.pval.adj.23) <- colnames(df.pval.all.23)
+rownames(df.pval.adj.23) <- rownames(df.pval.all.23)
+
+hist(unlist(df.pval.all.23))
+hist(unlist(df.pval.adj.23))
+plot(unlist(df.pval.all.23), unlist(df.pval.adj.23))
+
+plot(unlist(df.eff.std.23), unlist(df.pval.all.23))
+
+##################
+# color scale based on all effect sizes
+max_col <- max(unlist(df.eff.std.23), na.rm = T)
+min_col <- min(unlist(df.eff.std.23), na.rm = T)
+
+# make scale same at both ends
+max_col <- max(abs(max_col), abs(min_col))
+min_col <- min(abs(max_col), abs(min_col))*-1
+max_ceil <- ceiling(max_col*10)/10 # take ceiling rounded to one decimal place - used for placing ticks on legend
+
+colf <- colorRamp2(c('red', 'white', 'blue'), breaks = c(min_col, 0, max_col))
+
+# raw pvals
+# cell_text <- df.pval
+# cell_text[is.na(df.pval)] <- ''
+# cell_text[df.pval > 0.05] <- ''
+# cell_text[df.pval <= 0.05 & df.pval > 0.01] <- '*'
+# cell_text[df.pval <= 0.01 & df.pval > 0.001] <- '**'
+# cell_text[df.pval<= 0.001] <- '***'
+# cell_text <- t(cell_text)
+
+# adjusted pvalues
+cell_text <- df.pval.adj.23
+cell_text[is.na(df.pval.adj.23)] <- ''
+cell_text[df.pval.adj.23 > 0.05] <- ''
+cell_text[df.pval.adj.23 <= 0.05 & df.pval.adj.23 > 0.01] <- '*'
+cell_text[df.pval.adj.23 <= 0.01 & df.pval.adj.23 > 0.001] <- '**'
+cell_text[df.pval.adj.23<= 0.001] <- '***'
+cell_text <- t(cell_text)
+
+
+# heatmap
+
+hm23 <- Heatmap(as.matrix(t(df.eff.std.23)),
+        cluster_rows = F,
+        cluster_columns = F,
+        rect_gp = gpar(col = "black", lwd = 1),
+        col = colf,
+        na_col = 'grey80',
+        row_names_side = 'left',
+        column_names_side = 'top',
+        column_names_rot = 90,
+        column_names_centered = T,
+        column_title = 'Predictors',
+        column_title_gp = gpar(fontface = 'bold'),
+        row_title_gp = gpar(fontface = 'bold'),
+        row_title = 'Trait',
+        #left_annotation = ha_row,
+        heatmap_legend_param = list(title = 'Std. Effect Size', at = c(max_ceil*-1, 0, max_ceil)),
+        cell_fun = function(j, i, x, y, width, height, fill) { # add text to each grid
+                      grid.text(cell_text[i, j], x, y, gp = gpar(cex = 1.5))}
+        )
+
+
+ComplexHeatmap::draw(hm23, padding = unit(c(2, 30, 2, 15), "mm"))
+
+
+
+```
+
+### Print model tables - 2023
+
+```{r print_tables_2023}
+
+kable(df.eff.23, label = 'Effects for 2023 traits')
+
+kable(df.eff.std.23, label = 'Standardized effect sizes for 2023 traits')
+
+kable(df.pval.all.23, label = 'p-values for 2023 traits')
+
+kable(df.pval.adj.23, label = 'Adjusted p-values for 2023 traits')
+
+
+```
+
+### Test daylength effects on fall phenology
+
+Daylength could be determining when genotypes set bud - check whether the daylength of budset is the same for a given genotype, or varies across gardens, which would suggest that other environmental factors contribute to budset timing 
+
+```{r daylength}
+
+# daylength of budset by genotype
+# this varies across gardens, suggesting daylength is not the only factor controlling budset timing
+ggplot(data = dat, aes(x = Genotype, y = daylength_Stage6_2023, color = k2_tricho))+
+  geom_boxplot() +
+    geom_jitter(width = 0.2, height = 0) +
+    scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+  facet_wrap(~transect, scales = 'free_x')
+
+ggplot(data = dat, aes(x = Genotype, y = daylength_Stage8_2023, color = k2_tricho))+
+  geom_boxplot() +
+    geom_jitter(width = 0.2, height = 0) +
+    scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+  facet_wrap(~transect, scales = 'free_x')
+
+# plot timing vs daylength by garden
+ggplot(data = dat, aes(x = DOY_Stage6_2023, y = daylength_Stage6_2023, color = k2_tricho))+
+    geom_vline(xintercept = 171, col = 'grey', lty = 2 )+  # day of solstice
+    geom_point() +
+    scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+    facet_wrap(~MiniCG_Site, drop = T)
+
+ggplot(data = dat, aes(x = DOY_last_budset_2023, y = daylength_last_budset_2023, color = k2_tricho))+
+    geom_vline(xintercept = 171, col = 'grey', lty = 2 )+  # day of solstice
+    geom_point() +
+    scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+    facet_wrap(~MiniCG_Site, drop = T)
+
+ggplot(data = dat, aes(x = DOY_Stage6_2024, y = daylength_Stage6_2024, color = k2_tricho))+
+  geom_vline(xintercept = 171, col = 'grey', lty = 2 )+  # day of solstice
+    geom_point() +
+    scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+    facet_wrap(~MiniCG_Site_2024, drop = T)
+
+ggplot(data = dat, aes(x = DOY_last_budset_2024, y = daylength_last_budset_2024, color = k2_tricho))+
+    geom_vline(xintercept = 171, col = 'grey', lty = 2 )+  # day of solstice
+    geom_point() +
+    scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+    facet_wrap(~MiniCG_Site_2024, drop = T)
+
+```
+
+## 2024 data
+
+### Setup
+```{r stats_setup_2024}
+
+###############################################
+# phenotypes
+# all vars measured in 2024
+vars <- c("DOY_Stage2_2024", "Stage2_cGDD_2024", "DOY_Stage3_2024", "Stage3_cGDD_2024", "DOY_Stage6_2024", "DOY_last_budset_2024",  "DOY_Stage7_2024", "stage7_presence_2024", "growing_season_days_2024")
+###############################################
+
+# setup variables and put into a dataframe
+
+# set climate and phenotype variables
+garden_MAT <- dat$garden_MAT_2024
+garden_MAT_2 <- dat$garden_MAT_2024^2
+home_MAT <- dat$provenance_MAT
+home_MAT_2 <- dat$provenance_MAT^2
+garden_MAP <- dat$garden_MAP_2024
+garden_MAP_2 <- dat$garden_MAP_2024^2
+home_MAP <- dat$provenance_MAP
+home_MAP_2 <- dat$provenance_MAP^2
+home_lat <- dat$provenance_latitude
+garden_lat <- dat$garden_Latitude
+
+# random effects
+block <- as.character(interaction(dat$MiniCG_Site, dat$block, drop = T))
+#block <- as.character(dat$block)
+Pt <- dat$Pt
+genotype <- as.character(dat$Genotype)
+garden <- as.character(dat$MiniCG_Site)
+genetic_PC1 <- dat$genetic_PC1
+genetic_PC2 <- dat$genetic_PC2
+genetic_PC3 <- dat$genetic_PC3
+
+# put in df
+df <- data.frame(dat[,vars], garden_MAT, garden_MAT_2, home_MAT, home_MAT_2, garden_MAP, garden_MAP_2, home_MAP, home_MAP_2, home_lat, garden_lat, Pt, genotype, garden, block, genetic_PC1, genetic_PC2, genetic_PC3)
+rownames(df) <- dat$Unique_ID
+str(df)
+
+
+```
+
+
+### Models
+
+```{r model_with_all_vars_2024}
+
+dput(vars)
+
+# ignore stage 7 presence here because it's binary
+vars <- c("DOY_Stage2_2024", "Stage2_cGDD_2024", "DOY_Stage3_2024", "Stage3_cGDD_2024", 
+"DOY_Stage6_2024",  "DOY_Stage7_2024", "DOY_last_budset_2024",
+"growing_season_days_2024")
+
+mods.24 <- list()
+
+for(n in 1:length(vars)){
+  
+  var <- vars[n]
+  
+  print(paste('Model for:', var))
+
+  
+  #  full model with just linear interaction effects
+    mod <- lmer(paste0(var, '~ garden_MAT*home_MAT + garden_MAT*home_MAP +   garden_MAP*home_MAP + garden_MAP*home_MAT + genetic_PC1*garden_MAT + genetic_PC2*garden_MAT + genetic_PC3*garden_MAT +  genetic_PC1*garden_MAP + genetic_PC2*garden_MAP + genetic_PC3*garden_MAP + (1 | genotype) + (1 | garden/block)'),
+                        data = df
+  )
+  
+  mod.info <- Anova(mod)
+  
+  print(mod.info)
+
+    
+  # save to list
+  mods.24[[n]] <- mod
+  
+  p <- plot_model(mod, type = 'std', vline.color = "black", show.values = T, title = var)
+  plot(p)
+  
+  
+  # plots for significant factors
+    pvals <- mod.info$`Pr(>Chisq)`
+    if(min(pvals) <= 0.05){
+      
+      # get significant factors
+      sig <- rownames(mod.info)[pvals <= 0.05]
+      
+      # plot for each significant factor
+      for(f in 1:length(sig)){
+        
+        y <- var # y axis is always the trait
+        
+        # if it is an interaction effect, we need to include both variables in the plot
+        if(grepl(':', sig[f])){
+          
+          # get two variables in interaction
+          interaction_vars <- strsplit(sig[f], ':')[[1]]
+          
+          # env will start with 'garden' because it's always garden climate
+          env <- grep('garden', interaction_vars, value = T)
+          # the one without garden is the genetic effect, either PCs or home clim
+          x <- grep('garden', interaction_vars, value = T, invert = T)
+          
+          p2 <- plot_int(trait = y, genetics = x, env = env, dat = df)
+          #plot(p2)
+          
+          # if just a single variable, still plot gardens separately, but sort by MAT by default
+        } else{
+          
+          # if single variable is garden climate, use that and plot boxplots
+          if(grepl('garden', sig[f])){
+            env <- sig[f]
+            plot_env(trait = y, env = env, dat = df)
+            
+          # if single variable is a genotype characteristic, facet by garden sorted by MAT  
+          } else {
+            env <- 'garden_MAT'
+          x <- sig[f]
+           p2 <- plot_int(trait = y, genetics = x, env = env, dat = df)
+          #plot(p2)
+          }
+        }
+      }
+    }
+  
+}
+
+
+#plot_models(mods.24,std.est = T, m.labels = vars, p.shape = T, spacing = 1, vline.color = 'black', colors = cols25())
+
+names(mods.24) <- vars
+
+# setup dfs for effect sizes and p-values of each factor
+# use last full model run in loop to get effect names - models in mods object have some effects reduced
+rows <- names(fixef(mod))[-1] # names of fixed effects, minus intercept
+# reorder row so garden clim is first
+rows <- rows[c(1,4,2,3,5:17)]
+colms <- vars
+
+# effect size
+df.eff.24 <- as.data.frame(matrix(ncol = length(colms), nrow = length(rows)))
+colnames(df.eff.24) <- colms
+rownames(df.eff.24) <- rows
+# standardized effect size
+df.eff.std.24 <- as.data.frame(matrix(ncol = length(colms), nrow = length(rows)))
+colnames(df.eff.std.24) <- colms
+rownames(df.eff.std.24) <- rows
+# p values
+df.pval.24 <- as.data.frame(matrix(ncol = length(colms), nrow = length(rows)))
+colnames(df.pval.24) <- colms
+rownames(df.pval.24) <- rows
+# all p values
+df.pval.all.24 <- as.data.frame(matrix(ncol = length(colms), nrow = length(rows)))
+colnames(df.pval.all.24) <- colms
+rownames(df.pval.all.24) <- rows
+
+# get variables and their p-values 
+
+for(n in 1:length(vars)){
+  
+  var <- vars[[n]]
+  mod <- mods.24[[n]]
+  mod.info <- car::Anova(mod)
+  # standardize coefficients
+  eff.std <- effectsize::standardize_parameters(mod)
+  
+  # fixed effects, minus intercept
+  fes <- names(fixef(mod)[-1])
+  
+
+  
+  fes <- rownames(mod.info)
+  
+  # get their p-values and effect sizes for each fixed effect
+    for(f in 1:length(fes)){
+      
+      fe <- fes[[f]]
+      
+      # check for significance
+      pval <- mod.info[fe, 'Pr(>Chisq)']
+      
+      if(pval <= 0.05){
+        df.eff.24[fe, var] <- fixef(mods.24[[var]])[fe]
+        df.eff.std.24[fe,var] <- eff.std[eff.std$Parameter == fe, 'Std_Coefficient']
+        df.pval.24[fe, var] <- mod.info[fe, 'Pr(>Chisq)']
+      }
+  }
+}
+
+# get all pvalues so they can be adjusted
+for(n in 1:length(vars)){
+  
+  var <- vars[[n]]
+  mod <- mods.24[[n]]
+  mod.info <- car::Anova(mod)
+
+  # loop through retained variables and get their p-values and effect sizes
+    for(f in 1:nrow(df.pval.all.24)){
+      
+      fe <- rownames(df.pval.all.24)[f]
+      # get pval 
+         df.pval.all.24[fe, var] <- mod.info[fe, 'Pr(>Chisq)']
+         
+        # for car
+         
+  }
+}
+
+# adjust pvals
+padj <- p.adjust(unlist(df.pval.all.24), method = 'BH')
+df.pval.adj.24 <- as.data.frame(matrix(padj, ncol = ncol(df.pval.all.24)))
+colnames(df.pval.adj.24) <- colnames(df.pval.all.24)
+rownames(df.pval.adj.24) <- rownames(df.pval.all.24)
+
+hist(unlist(df.pval.all.24))
+hist(unlist(df.pval.adj.24))
+plot(unlist(df.pval.all.24), unlist(df.pval.adj.24))
+
+plot(unlist(df.eff.std.24), unlist(df.pval.all.24))
+
+##################
+# color scale based on all effect sizes
+max_col <- max(unlist(df.eff.std.24), na.rm = T)
+min_col <- min(unlist(df.eff.std.24), na.rm = T)
+
+# make scale same at both ends
+max_col <- max(abs(max_col), abs(min_col))
+min_col <- min(abs(max_col), abs(min_col))*-1
+max_ceil <- ceiling(max_col*10)/10 # take ceiling rounded to one decimal place - used for placing ticks on legend
+
+colf <- colorRamp2(c('red', 'white', 'blue'), breaks = c(min_col, 0, max_col))
+
+# raw pvals
+# cell_text <- df.pval
+# cell_text[is.na(df.pval)] <- ''
+# cell_text[df.pval > 0.05] <- ''
+# cell_text[df.pval <= 0.05 & df.pval > 0.01] <- '*'
+# cell_text[df.pval <= 0.01 & df.pval > 0.001] <- '**'
+# cell_text[df.pval<= 0.001] <- '***'
+# cell_text <- t(cell_text)
+
+# adjusted pvalues
+cell_text <- df.pval.adj.24
+cell_text[is.na(df.pval.adj.24)] <- ''
+cell_text[df.pval.adj.24 > 0.05] <- ''
+cell_text[df.pval.adj.24 <= 0.05 & df.pval.adj.24 > 0.01] <- '*'
+cell_text[df.pval.adj.24 <= 0.01 & df.pval.adj.24 > 0.001] <- '**'
+cell_text[df.pval.adj.24<= 0.001] <- '***'
+cell_text <- t(cell_text)
+
+
+# heatmap for 2024 traits
+hm24 <- Heatmap(as.matrix(t(df.eff.std.24)),
+        cluster_rows = F,
+        cluster_columns = F,
+        rect_gp = gpar(col = "black", lwd = 1),
+        col = colf,
+        na_col = 'grey80',
+        row_names_side = 'left',
+        column_names_side = 'top',
+        column_names_rot = 90,
+        column_names_centered = T,
+        column_title = 'Predictors',
+        column_title_gp = gpar(fontface = 'bold'),
+        row_title_gp = gpar(fontface = 'bold'),
+        row_title = 'Trait',
+        #left_annotation = ha_row,
+        heatmap_legend_param = list(title = 'Std. Effect Size', at = c(max_ceil*-1, 0, max_ceil)),
+        cell_fun = function(j, i, x, y, width, height, fill) { # add text to each grid
+                      grid.text(cell_text[i, j], x, y, gp = gpar(cex = 1.5))}
+        )
+
+
+ComplexHeatmap::draw(hm24, padding = unit(c(2, 30, 2, 15), "mm"))
+
+
+```
+
+### Print model tables - 2024
+
+```{r print_tables_2024}
+
+kable(df.eff.24, label = 'Effects for 2024 traits')
+
+kable(df.eff.std.24, label = 'Standardized effect sizes for 2024 traits')
+
+kable(df.pval.all.24, label = 'p-values for 2024 traits')
+
+kable(df.pval.adj.24, label = 'Adjusted p-values for 2024 traits')
+
+
+```
+
+# Summary heatmap
+
+```{r plot_years_together}
+
+# check that effects match
+cbind(rownames(df.eff.std.23), rownames(df.eff.std.24))
+
+# merge effect sizes
+df.eff.both <- cbind.data.frame(df.eff.std.23, df.eff.std.24)
+head(df.eff.both)
+
+# merge pvalues
+df.pval.adj.both <- cbind.data.frame(df.pval.adj.23, df.pval.adj.24)
+
+rownames(df.pval.adj.both) <- rownames(df.eff.both)
+colnames(df.pval.adj.both) <- colnames(df.eff.both)
+
+df.pval.both <- cbind.data.frame(df.pval.23, df.pval.24)
+rownames(df.pval.both) <- rownames(df.eff.both)
+colnames(df.pval.both) <- colnames(df.eff.both)
+
+# reorder rows
+dput(colnames(df.eff.both))
+ord <- c("growing_season_days_2023", "growing_season_days_2024", "DOY_Stage2_2023", "Stage2_cGDD_2023", "DOY_Stage2_2024", "Stage2_cGDD_2024", "DOY_Stage3_2023", "Stage3_cGDD_2023",  "DOY_Stage3_2024", "Stage3_cGDD_2024","DOY_Stage6_2023", "DOY_Stage6_2024", "DOY_Stage7_2023", "DOY_Stage7_2024", "DOY_last_budset_2023", "DOY_last_budset_2024", 
+ "leaf_thickness_avg_mm_2023", "leaf_area_cm2_2023", 
+"leaf_mass_g_2023", "LMA_g_m2_2023", "lower_stomata_pore_length_mean_um", 
+"upper_stomata_pore_length_mean_um", "lower_stomata_density_mm2", 
+"upper_stomata_density_mm2",  "licor_gsw", "stomata_ratio", 
+"licor_ETR", "licor_Fm.", "licor_Fs", "licor_gbw",  
+  "licor_PhiPS2"  
+)
+
+df.eff.both <- df.eff.both[,ord]
+df.pval.adj.both <- df.pval.adj.both[,ord]
+
+
+# clean up trait names
+
+trait_names <- colnames(df.eff.both)
+trait_names <- gsub('Stage2_cGDD', 'Stage2_Bud_Flush_cGDD', trait_names)
+trait_names <- gsub('DOY_Stage2', 'Stage2_Bud_Flush_DOY', trait_names)
+trait_names <- gsub('DOY_Stage3', 'Stage3_Leaf_Emergence_DOY', trait_names)
+trait_names <- gsub('DOY_Stage6', 'Stage6_First_Budset_DOY', trait_names)
+trait_names <- gsub('DOY_Stage7', 'Stage7_Lammas_Growth_DOY', trait_names)
+#trait_names <- gsub('stage7_presence', 'Stage7_Lammas_Growth_presence', trait_names)
+trait_names <- gsub('DOY_Stage8', 'Stage8_Budset_after_Lammas_DOY', trait_names)
+trait_names <- gsub('DOY_last_budset', 'Stage8_Final_Budset_DOY', trait_names)
+trait_names <- gsub('growing_season_days', 'Growing_Season_Days', trait_names)
+
+trait_names <- gsub('licor_', '', trait_names)
+trait_names <- gsub('Fm.', "Fm'", trait_names)
+trait_names <- gsub('upper', "Adaxial", trait_names)
+trait_names <- gsub('lower', "Abaxial", trait_names)
+trait_names <- gsub('stomata_ratio', "Stomata_ratio", trait_names)
+trait_names <- gsub('leaf', 'Leaf', trait_names)
+
+# remove units
+trait_names <- gsub('_cm2', '', trait_names)
+trait_names <- gsub('_cm', '', trait_names)
+trait_names <- gsub('_mm2', '', trait_names)
+trait_names <- gsub('_m2', '', trait_names)
+trait_names <- gsub('_mm', '', trait_names)
+trait_names <- gsub('_um', '', trait_names)
+trait_names <- gsub('_g', '', trait_names)
+
+trait_names <- gsub('_', ' ', trait_names)
+
+# check
+cbind(colnames(df.eff.both), trait_names)
+
+
+# rename effects
+effect_names <- rownames(df.eff.both)
+effect_names <- gsub('home', 'Home', effect_names)
+effect_names <- gsub('garden', 'Garden', effect_names)
+effect_names <- gsub('genetic', 'Genetic', effect_names)
+effect_names <- gsub(':', ' x ', effect_names)
+effect_names <- gsub('_', ' ', effect_names)
+# check
+cbind(rownames(df.eff.both), effect_names)
+
+# adjusted pvalues
+cell_text <- df.pval.adj.both
+cell_text[is.na(df.pval.adj.both)] <- ''
+cell_text[df.pval.adj.both > 0.05] <- ''
+cell_text[df.pval.adj.both <= 0.05 & df.pval.adj.both > 0.01] <- '*'
+cell_text[df.pval.adj.both <= 0.01 & df.pval.adj.both > 0.001] <- '**'
+cell_text[df.pval.adj.both<= 0.001] <- '***'
+cell_text <- t(cell_text)
+
+# color scale based on all effect sizes
+max_col <- max(unlist(df.eff.both), na.rm = T)
+min_col <- min(unlist(df.eff.both), na.rm = T)
+
+# make scale same at both ends
+max_col <- max(abs(max_col), abs(min_col))
+min_col <- min(abs(max_col), abs(min_col))*-1
+max_ceil <- ceiling(max_col*10)/10 # take ceiling rounded to one decimal place - used for placing ticks on legend
+
+colf <- colorRamp2(c('red', 'white', 'blue'), breaks = c(min_col, 0, max_col))
+
+# column annotation - GxE categories
+col_cat <-  c(rep('E', 2), rep('G', 5), rep('GxE', 10))
+ha_col <- columnAnnotation(Effect_Category = col_cat,
+                        show_annotation_name = F,
+                            col = list(Effect_Category = c('E' = "#015b58", 'G' = "#4760b8", 'GxE' = "#380069" )))
+
+
+# row annotation - trait categories
+cats <- c(rep('Phenology', 16),  rep('Leaf Morphology', 4), rep('Stomata', 6), rep('Photosynthesis', 5))
+cbind(colnames(df.eff.both), cats)
+
+# choose colors
+ha_row <- rowAnnotation(Trait_Category = cats,
+                        show_annotation_name = F,
+                            col = list(Trait_Category = c('Phenology' = "#e2e260", 'Photosynthesis' = "#2d4030", 'Leaf Morphology' = "#516823", 'Stomata' =  "#88a2b9")))
+
+
+# combined heatmap
+hm_both <- Heatmap(as.matrix(t(df.eff.both)),
+        cluster_rows = F,
+        cluster_columns = F,
+        rect_gp = gpar(col = "black", lwd = 1),
+        col = colf,
+        na_col = 'grey80',
+        row_names_side = 'left',
+        row_labels = trait_names,
+        column_names_side = 'top',
+        column_names_rot = 90,
+        column_names_centered = F,
+        column_title = 'Trait Predictors',
+        column_title_gp = gpar(fontface = 'bold'),
+        column_labels = effect_names,
+        row_title_gp = gpar(fontface = 'bold'),
+        row_title = 'Trait',
+        left_annotation = ha_row,
+        top_annotation = ha_col,
+        heatmap_legend_param = list(title = 'Std. Effect Size', at = c(max_ceil*-1, 0, max_ceil)),
+        cell_fun = function(j, i, x, y, width, height, fill) { # add text to each grid
+                      grid.text(cell_text[i, j], x, y, gp = gpar(cex = 1.5))}
+        )
+
+
+#png(file = 'results/plasticity/GxE_full_models_heatmap_2023-2024.png', height = 10, width = 12, res = 300, units = 'in')
+#pdf(file = 'results/plasticity/GxE_full_models_heatmap_2023-2024.pdf', height = 10, width = 12)
+ComplexHeatmap::draw(hm_both, padding = unit(c(2, 30, 2, 15), "mm"))
+#dev.off()
+
+
+# save heatmap object and matrix used for it
+# can use to combine with plasticity heatmap
+gxe_hm <- list(effect = df.eff.both,
+               pval = df.pval.both,
+               pval_adj = df.pval.adj.both,
+               hm_text = cell_text,
+               row_annot = ha_row,
+               col_annot = ha_col,
+               heatmap = hm_both)
+
+
+#save(gxe_hm, file = 'results/plasticity/GxE_traits_heatmap_data.Rdata')
+
+```
+

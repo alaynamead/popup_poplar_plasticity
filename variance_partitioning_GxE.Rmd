@@ -1,0 +1,304 @@
+---
+title: "GxE Variance Paritioning"
+author: "Alayna Mead"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    toc: true
+    number_sections: true
+    highlight: rstudio
+---
+
+Determine the proportion of variance in a trait that is explained by genotype (G), environment (E), genotype x environment (GxE), block nested within garden, and the residuals.
+
+# Setup
+
+```{r setup}
+
+library(ggplot2)
+library(lme4)
+library(dplyr)
+library(tidyr)
+library(viridis) # color palettes
+library(knitr) # kable() for tables
+
+# load data
+load('data/clean/mini_garden_phenotypic_and_climate_data_2021-2024.Rdata')
+
+# set negative heights to NA
+dat$GrowthIncrement_2023[dat$GrowthIncrement_2024 < 0] <- NA
+dat$GrowthIncrement_2023[dat$GrowthIncrement_2023 < 0] <- NA
+dat$GrowthIncrement_2022[dat$GrowthIncrement_2022 < 0] <- NA
+dat$GrowthIncrement_2021[dat$GrowthIncrement_2021 < 0] <- NA
+
+# remove NA genotypes and those without genetic info
+dat <- dat[! is.na(dat$Genotype),]
+dat <- dat[! is.na(dat$k2_tricho),]
+
+# print session info, including package versions
+sessionInfo()
+
+```
+
+
+# Statistics - GxE variance partitioning
+
+Get hte proportion of variance explained by factors modelled as random effects using lmer (most traits) or glmer (traits with binary measures).
+
+```{r stats_GxE}
+
+# the list of traits to use
+
+traits <- c("GrowthIncrement_2021", "GrowthIncrement_2022", "GrowthIncrement_2023", "GrowthIncrement_2024", # growth
+            "DOY_Stage2_2021", "DOY_Stage3_2021", "DOY_Stage6_2021", "growing_season_days_2021", "Stage2_cGDD_2021", "Stage3_cGDD_2021", # 2021 phenology
+            "DOY_Stage2_2022", "DOY_Stage3_2022", "DOY_Stage6_2022", "Stage2_cGDD_2022", "Stage3_cGDD_2022", "growing_season_days_2022", # 2022 phenology
+            "DOY_Stage2_2023", "DOY_Stage3_2023", "Stage2_cGDD_2023", "Stage3_cGDD_2023", "DOY_Stage6_2023", "DOY_Stage7_2023", "stage7_presence_2023", "DOY_Stage8_2023", "DOY_last_budset_2023", "growing_season_days_2023", # 2023 phenology
+            "DOY_Stage2_2024", "DOY_Stage3_2024", "Stage2_cGDD_2024", 
+"Stage3_cGDD_2024", "DOY_Stage6_2024", "DOY_Stage7_2024",  "stage7_presence_2024", "DOY_Stage8_2024", "DOY_last_budset_2024", "growing_season_days_2024",
+            "leaf_thickness_avg_mm_2023", "leaf_area_cm2_2023", "leaf_mass_g_2023", "LMA_g_m2_2023", # leaf morphology
+"lower_stomata_pore_length_mean_um", "upper_stomata_pore_length_mean_um", "lower_stomata_density_mm2", "upper_stomata_density_mm2", "stomata_ratio", "upper_stomata_presence", "licor_gsw", # stomata 
+             "licor_gbw", "licor_ETR", "licor_Fs", "licor_Fm.", "licor_PhiPS2" # photosynthesis
+)
+
+# presence/absence traits get modeled differently
+traits_bin <- c("stage7_presence_2023", "stage7_presence_2024", "upper_stomata_presence")
+
+
+# categorize traits for plotting
+traits_group <- c(rep('Growth', 4), rep('Phenology', 32), rep('Leaf\nMorphology', 4), rep('Stomata', 7), rep('Photosynthesis', 5))
+cbind(traits, traits_group)
+
+# set up dataframes to save results
+df <- dat[,traits]
+df$genotype <- as.character(dat$Genotype)
+df$garden <- as.character(dat$MiniCG_Site)
+df$block <- as.character(dat$block)
+
+str(df)
+
+# variance explained df
+explained <- as.data.frame(matrix(nrow = length(traits), ncol = 5))
+colnames(explained) <- c('Genotype x Environment', 'Genotype', 'Block', 'Environment',  'Residual')
+rownames(explained) <- traits
+
+
+# loop through and fit model to each trait
+
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  print(trait)
+  
+  # setup formula
+  formula <- as.formula(paste(trait, "~ 1 + (1|genotype) + (1|garden/block) + (1|genotype:garden)"))
+  
+  # presence/absence traits have to be run separately
+  # use a glmer with binomial link
+  if(trait %in% traits_bin){
+    
+  # model with a binomial link function
+   mod <- glmer(formula,
+          data = df,
+          family = binomial)
+   
+    vcs <- as.data.frame(VarCorr(mod))
+    
+    # calculate proportion variance explained
+    # the sum and residuals are (pi^2)/3, see eg:
+    # https://stats.stackexchange.com/questions/128750/residual-variance-for-glmer
+    vcs_sum <- sum(vcs$vcov) + ((pi^2) / 3)
+    explained[n,'Genotype x Environment'] <- (vcs[vcs$grp == 'genotype:garden', 'vcov']/vcs_sum)*100
+    explained[n,'Genotype'] <- (vcs[vcs$grp == 'genotype', 'vcov']/vcs_sum)*100
+    explained[n,'Environment'] <- (vcs[vcs$grp == 'garden', 'vcov']/vcs_sum)*100
+    explained[n, 'Residual'] <- (((pi^2) / 3)/vcs_sum)*100
+    explained[n,'Block'] <- (vcs[vcs$grp == 'block:garden', 'vcov']/vcs_sum)*100
+    
+  }else{
+ 
+  # run the model
+  mod <- lmer(formula, data = df)
+  
+  # save variances
+  # need to make sure column names in explained match groups in vcs
+  vcs <- as.data.frame(VarCorr(mod))
+  explained[n,] <- vcs$vcov
+    
+  }
+}
+
+
+# convert variance explained to a proportion of the total
+explained.prop <- explained
+
+for(n in 1:nrow(explained)){
+  
+  total <- sum(explained[n, c("Genotype x Environment", "Genotype", "Block", "Environment", "Residual")])
+  
+  prop <- explained[n, c("Genotype x Environment", "Genotype", "Block", "Environment", "Residual")]/total
+  
+  explained.prop[n, c("Genotype x Environment", "Genotype", "Block", "Environment", "Residual")] <- prop
+  
+}
+
+sum(rownames(explained) != rownames(explained.prop))
+explained.prop$category <- explained$category
+
+# plot as a stacked barplot
+
+explained$trait <- row.names(explained)
+explained$category <- traits_group
+exp.long <- explained %>% mutate(trait = factor(trait)) %>% pivot_longer(cols = c('Genotype x Environment', 'Genotype', 'Environment', 'Residual', 'Block'))
+exp.long$Effect <- factor(exp.long$name, levels = c('Residual', 'Block', 'Genotype x Environment', 'Genotype', 'Environment'))
+
+ggplot(exp.long, aes(y = trait, x = value, fill = Effect)) +
+  geom_bar(position = "fill", stat = "identity") +
+  scale_fill_viridis_d(option = 'mako', direction = 1) +
+  facet_grid(rows = vars(category), drop = T, scales = 'free_y', space = 'free_y') +
+  xlab('Proportion Variance Explained') +
+  ylab('Trait') +
+  theme_set(theme_bw(base_size = 10))
+
+#ggsave(file = 'results/plasticity/GxE_variance_explained_allTraits_allYears_withBlock.png', height = 10, width = 8)
+
+
+```
+
+# Table with results
+
+```{r table}
+
+kable(explained, label = 'Raw variance explained')
+
+kable(explained.prop, label = 'Proportion variance explained')
+
+```
+
+
+# Nice plots
+
+A nicer plot with trait categories and cleaned trait names
+
+```{r nice_plots, fig.height = 8}
+
+# simplify trait names, remove units
+colnames(explained)
+explained$trait_names <- explained$trait
+explained$trait_names <- gsub('Stage2_cGDD', 'Stage2_Bud_Flush_cGDD', explained$trait_names)
+explained$trait_names <- gsub('DOY_Stage2', 'Stage2_Bud_Flush_DOY', explained$trait_names)
+explained$trait_names <- gsub('DOY_Stage3', 'Stage3_Leaf_Emergence_DOY', explained$trait_names)
+explained$trait_names <- gsub('DOY_Stage6', 'Stage6_First_Budset_DOY', explained$trait_names)
+explained$trait_names <- gsub('DOY_Stage7', 'Stage7_Lammas_Growth_DOY', explained$trait_names)
+explained$trait_names <- gsub('stage7_presence', 'Stage7_Lammas_Growth_presence', explained$trait_names)
+explained$trait_names <- gsub('DOY_Stage8', 'Stage8_Budset_after_Lammas_DOY', explained$trait_names)
+explained$trait_names <- gsub('DOY_last_budset', 'Stage8_Final_Budset_DOY', explained$trait_names)
+explained$trait_names <- gsub('growing_season_days', 'Growing_Season_Days', explained$trait_names)
+explained$trait_names <- gsub('licor_', '', explained$trait_names)
+explained$trait_names <- gsub('Fm.', "Fm'", explained$trait_names)
+explained$trait_names <- gsub('upper', "Adaxial", explained$trait_names)
+explained$trait_names <- gsub('lower', "Abaxial", explained$trait_names)
+explained$trait_names <- gsub('stomata_ratio', "Stomata_ratio", explained$trait_names)
+explained$trait_names <- gsub('leaf', 'Leaf', explained$trait_names)
+
+# remove units
+explained$trait_names <- gsub('_cm2', '', explained$trait_names)
+explained$trait_names <- gsub('_cm', '', explained$trait_names)
+explained$trait_names <- gsub('_mm2', '', explained$trait_names)
+explained$trait_names <- gsub('_m2', '', explained$trait_names)
+explained$trait_names <- gsub('_mm', '', explained$trait_names)
+explained$trait_names <- gsub('_um_', '', explained$trait_names)
+explained$trait_names <- gsub('_g', '', explained$trait_names)
+
+
+explained$trait_names <- gsub('_', ' ', explained$trait_names)
+
+# reorder so they're alphabetical from top to bottom
+explained$trait_names <- factor(explained$trait_names, levels = sort(explained$trait_names, decreasing = T))
+
+# transform to long-form dataframe for ggplot
+explained$trait <- row.names(explained)
+explained$category <- traits_group
+exp.long <- explained %>% mutate(trait = factor(trait)) %>% pivot_longer(cols = c('Genotype x Environment', 'Genotype', 'Environment', 'Residual', 'Block'))
+exp.long$Effect <- factor(exp.long$name, levels = c('Residual', 'Block', 'Genotype x Environment', 'Genotype', 'Environment'))
+
+# plot!
+ggplot(exp.long, aes(y = trait_names, x = value, fill = Effect)) +
+  geom_bar(position = "fill", stat = "identity") +
+  scale_fill_viridis_d(option = 'mako', direction = 1) +
+  facet_grid(rows = vars(category), drop = T, scales = 'free_y', space = 'free_y') +
+  xlab('Proportion Variance Explained') +
+  ylab('Trait') +
+  theme_set(theme_bw(base_size = 10))
+
+#ggsave(file = 'results/plasticity/GxE_variance_explained_allTraits_allYears.png', height = 10, width = 8)
+
+
+#########################
+
+# subset to only 2023 and 2024 measures
+include <- c("GrowthIncrement_2023", "GrowthIncrement_2024","DOY_Stage2_2023", "DOY_Stage3_2023", "Stage2_cGDD_2023", "Stage3_cGDD_2023", "DOY_Stage6_2023", "DOY_Stage7_2023", "stage7_presence_2023", "DOY_Stage8_2023", "DOY_last_budset_2023", "growing_season_days_2023", "DOY_Stage2_2024", "DOY_Stage3_2024", "Stage2_cGDD_2024", "Stage3_cGDD_2024", "DOY_Stage6_2024", "DOY_Stage7_2024", "stage7_presence_2024", "DOY_Stage8_2024", "DOY_last_budset_2024", "growing_season_days_2024", "leaf_thickness_avg_mm_2023", "leaf_area_cm2_2023", "leaf_mass_g_2023", "LMA_g_m2_2023", "lower_stomata_pore_length_mean_um", "upper_stomata_pore_length_mean_um", "lower_stomata_density_mm2", "upper_stomata_density_mm2", "stomata_ratio", "upper_stomata_presence", "licor_gsw", "licor_gbw", "licor_ETR", "licor_Fs", "licor_Fm.", "licor_PhiPS2")
+explained.sub <- explained[explained$trait %in% include,]
+
+
+# reorder so they're alphabetical from top to bottom
+# reversed because geom_bar plots them in reverse
+explained.sub$trait_names <- factor(explained.sub$trait_names, levels = sort(explained.sub$trait_names, decreasing = F))
+
+# transform to long-form dataframe for ggplot
+exp.sub.long <- explained.sub %>% mutate(trait_names = factor(trait_names)) %>% pivot_longer(cols = c('Genotype x Environment', 'Genotype', 'Environment', 'Residual', 'Block'))
+#exp.sub.long$Effect <- factor(exp.sub.long$name, levels =c('Residual', 'Block', 'Genotype x Environment', 'Genotype', 'Environment'))
+
+exp.sub.long$Effect <- factor(exp.sub.long$name, levels =c("Genotype", "Environment", "Genotype x Environment", "Block", "Residual"))
+
+exp.sub.long$category <- factor(exp.sub.long$category, levels = c('Growth', 'Phenology', 'Leaf\nMorphology', 'Stomata', 'Photosynthesis'))
+
+# edit color palette
+# I started with this palette: PNWColors::rev(pnw_palette('Starfish', 4))
+# then edited colors to be a bit more distinguishable
+cols <- c("#4760b8", "#015b58", "#380069", "#e69b99")
+
+ggplot(exp.sub.long, aes(y = trait_names, x = value, fill = Effect)) +
+  geom_bar(aes(fill = Effect), position = position_fill(reverse = TRUE), stat = "identity") +
+  scale_fill_manual(values = c(cols, 'grey50')) +
+  facet_grid(rows = vars(category), drop = T, scales = 'free_y', space = 'free_y') +
+  xlab('Proportion Variance Explained') +
+  ylab('Trait') +
+  theme_set(theme_bw(base_size = 10))
+
+
+#ggsave(file = 'results/plasticity/GxE_variance_explained_allTraits_2023-2024.png', height = 8, width = 8)
+
+#ggsave(file = 'results/plasticity/GxE_variance_explained_allTraits_2023-2024.pdf', height = 8, width = 8)
+
+
+##################
+# Final plot
+# subset to only 2023 and 2024 measures
+# remove cGDD
+
+include <- c("GrowthIncrement_2023", "GrowthIncrement_2024","DOY_Stage2_2023", "DOY_Stage3_2023","DOY_Stage6_2023", "DOY_Stage7_2023", "stage7_presence_2023", "DOY_last_budset_2023", "growing_season_days_2023", "DOY_Stage2_2024", "DOY_Stage3_2024", "DOY_Stage6_2024", "DOY_Stage7_2024", "stage7_presence_2024", "DOY_last_budset_2024", "growing_season_days_2024", "leaf_thickness_avg_mm_2023", "leaf_area_cm2_2023", "leaf_mass_g_2023", "LMA_g_m2_2023", "lower_stomata_pore_length_mean_um", "upper_stomata_pore_length_mean_um", "lower_stomata_density_mm2", "upper_stomata_density_mm2", "stomata_ratio", "upper_stomata_presence", "licor_gsw", "licor_gbw", "licor_ETR", "licor_Fs", "licor_Fm.", "licor_PhiPS2")
+explained.sub <- explained[explained$trait %in% include,]
+
+# reorder so they're alphabetical from top to bottom
+explained.sub$trait_names <- factor(explained.sub$trait_names, levels = sort(explained.sub$trait_names, decreasing = T))
+
+exp.sub.long <- explained.sub %>% mutate(trait_names = factor(trait_names)) %>% pivot_longer(cols = c('Genotype x Environment', 'Genotype', 'Environment', 'Residual', 'Block'))
+exp.sub.long$Effect <- factor(exp.sub.long$name, levels =c('Residual', 'Block', 'Genotype x Environment', 'Genotype', 'Environment'))
+
+# edit color palette
+# I started with this palette: PNWColors::rev(pnw_palette('Starfish', 4))
+# then edited colors to be a bit more distinguishable
+cols <- c("#e69b99","#380069","#4760b8","#015b58")
+
+ggplot(exp.sub.long, aes(y = trait_names, x = value, fill = Effect)) +
+  geom_bar(position = "fill", stat = "identity") +
+  scale_fill_manual(values = c('grey50', cols)) +
+  facet_grid(rows = vars(category), drop = T, scales = 'free_y', space = 'free_y') +
+  xlab('Proportion Variance Explained') +
+  ylab('Trait') +
+  theme_set(theme_bw(base_size = 10))
+
+#ggsave(file = 'results/plasticity/GxE_variance_explained_withBlock_clean_2023-2024.png', height = 8, width = 8)
+
+```
+
+

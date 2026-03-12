@@ -1,0 +1,2745 @@
+---
+title: "Test for trait-fitness associations"
+author: "Alayna Mead"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    toc: true
+    number_sections: true
+    highlight: rstudio
+    
+---
+
+Test whether traits and their plasticity predict growth in each garden and summarize relationships across garden climates.
+
+# Setup
+
+```{r setup}
+
+library(ggplot2)
+library(gridExtra) # arrange plots
+library(cowplot) # arrange plots
+library(ggrepel) # text labels for gardens
+library(ggnewscale) # multiple color scales
+library(lme4) # models
+library(sjPlot) # model plots
+library(car) # Anova
+
+sessionInfo()
+
+# load data
+load('data/clean/mini_garden_phenotypic_and_climate_data_2021-2024.Rdata')
+
+
+# set negative heights to NA
+dat$GrowthIncrement_2024[dat$GrowthIncrement_2024 < 0] <- NA
+dat$GrowthIncrement_2023[dat$GrowthIncrement_2023 < 0] <- NA
+dat$GrowthIncrement_2022[dat$GrowthIncrement_2022 < 0] <- NA
+dat$GrowthIncrement_2021[dat$GrowthIncrement_2021 < 0] <- NA
+
+# remove NA genotypes and those without genetic info
+dat <- dat[! is.na(dat$Genotype),]
+dat <- dat[! is.na(dat$k2_tricho),]
+
+# estimate mortality at beginning of spring
+# if it was marked alive in fall but did not have a height next spring, mark as dead
+dat$Survival_spring_2024 <- NA
+dat$Survival_spring_2024[dat$Survival_09_2023 == 1 & is.na(dat$PreFlush_Height_cm_2024)] <- 0
+dat$Survival_spring_2024[dat$Survival_09_2023 == 1 & ! is.na(dat$PreFlush_Height_cm_2024)] <- 1
+
+table(dat$Survival_spring_2024, dat$MiniCG_Site)
+
+# load plasticity values - named rdpi
+load('data/clean/genotypePlasticityRDPI_2023-2024.Rdata')
+
+# print session info, including package versions
+sessionInfo()
+
+```
+
+```{r markdown_settings}
+
+# setup markdown
+knitr::opts_chunk$set(fig.width = 14, fig.height = 12)
+
+```
+
+```{r setup_ggplot}
+
+# setup ggplot
+theme_set(
+  theme_bw(base_size = 12) +
+    theme(plot.title = element_text(size = 12))
+)
+
+```
+
+
+```{r setup_plots}
+
+# look at relationships among garden climate variables
+
+# garden climates
+par(mfrow = c(1, 3))
+plot(dat$garden_climate_2023_PC1, dat$garden_climate_2023_PC2, type = 'n')
+text(dat$garden_climate_2023_PC1, dat$garden_climate_2023_PC2, labels = dat$MiniCG_Site)
+
+plot(dat$garden_MAT_2023, dat$garden_MAP_2023, type = 'n')
+text(dat$garden_MAT_2023, dat$garden_MAP_2023, labels = dat$MiniCG_Site)
+
+plot(dat$garden_MAT_2023, dat$garden_TD_2023, type = 'n')
+text(dat$garden_MAT_2023, dat$garden_TD_2023, labels = dat$MiniCG_Site)
+par(mfrow = c(1, 1)) # reset
+
+
+# plot traits vs fitness for each garden separately
+
+traits <- c("DOY_last_budset_2023", "growing_season_days_2023", "licor_gsw", "licor_gbw", "licor_ETR", "licor_PhiPS2", "licor_Fs", "licor_Fm.", "leaf_thickness_avg_mm_2023", "LMA_g_m2_2023", "leaf_mass_g_2023", "leaf_area_cm2_2023", "lower_stomata_pore_length_mean_um", "upper_stomata_presence", "upper_stomata_pore_length_mean_um",  "upper_stomata_density_mm2", "lower_stomata_density_mm2", "stomata_density_both", "upper_stomata_density_over_total_density", "stomata_ratio")
+
+dat$log_GrowthIncrement_2023 <- log(dat$GrowthIncrement_2023+1)
+
+```
+
+## Functions
+
+```{r functions}
+
+
+# function to convert numeric pvalues to text (used for plot titles)
+pval_stars <- function(pval){
+  
+  if(pval > 0.05){
+    return('NS')
+  } else if(pval <= 0.05 & pval > 0.01){
+    return('*')
+  } else if(pval <= 0.01 & pval > 0.001){
+    return('**')
+  } else if(pval <= 0.001){
+    return('***')
+  }
+  
+}
+
+
+```
+
+## Setup for climate color palettes
+
+```{r setup_colors}
+
+# get climate ranges across both years, so the same color scale is used for 2023 and 2024 plots
+# this is used to set 'limits' in scale_color_gradient2() 
+
+
+# MAT
+sites.23 <- c("SWMN", "WI", "ID", "WYO", "EVERGREEN", "MSU", "OSU", "MORTON", "WSU", "PENN", "VA", "SU")
+sites.24 <- c("SWMN", "WI", "ID", "WYO", "EVERGREEN", "MSU", "MORTON", "PENN", "SU")
+
+sites.mat.23 <- dat$garden_MAT_2023[match(sites.23, dat$MiniCG_Site)]
+sites.mat.24 <- dat$garden_MAT_2024[match(sites.24, dat$MiniCG_Site)]
+
+range_mat <- range(c(sites.mat.23, sites.mat.24))
+
+# MAP
+sites.map.23 <- dat$garden_MAP_2023[match(sites.23, dat$MiniCG_Site)]
+sites.map.24 <- dat$garden_MAP_2024[match(sites.24, dat$MiniCG_Site)]
+
+range_map <- range(c(sites.map.23, sites.map.24))
+
+# TD
+sites.td.23 <- dat$garden_TD_2023[match(sites.23, dat$MiniCG_Site)]
+sites.td.24 <- dat$garden_TD_2024[match(sites.24, dat$MiniCG_Site)]
+
+range_td <- range(c(sites.td.23, sites.td.24))
+
+```
+
+## Setup trait labels
+
+```{r cleanup_trait_names}
+
+traits <- c("DOY_Stage2_2023", "DOY_Stage3_2023", "DOY_Stage6_2023", "DOY_Stage7_2023", "stage7_presence_2023", "DOY_last_budset_2023", "growing_season_days_2023", "licor_gsw", "licor_gbw", "licor_ETR", "licor_PhiPS2", "licor_Fs", "licor_Fm.", "leaf_thickness_avg_mm_2023", "LMA_g_m2_2023", "leaf_mass_g_2023", "leaf_area_cm2_2023", "lower_stomata_pore_length_mean_um", "upper_stomata_presence", "upper_stomata_pore_length_mean_um",  "upper_stomata_density_mm2", "lower_stomata_density_mm2", "stomata_ratio", "DOY_Stage2_2024", "DOY_Stage3_2024", "DOY_Stage6_2024", "DOY_Stage7_2024", "stage7_presence_2024", "DOY_last_budset_2024", "growing_season_days_2024", "plasticity_rdpi_GrowthIncrement_2023_log", "plasticity_rdpi_DOY_Stage2_2023", "plasticity_rdpi_DOY_Stage3_2023", "plasticity_rdpi_DOY_Stage6_2023", "plasticity_rdpi_DOY_last_budset_2023", "plasticity_rdpi_stage7_presence_2023", "plasticity_rdpi_growing_season_days_2023", "plasticity_rdpi_DOY_Stage7_2023", "plasticity_rdpi_licor_gsw", "plasticity_rdpi_licor_gbw", "plasticity_rdpi_licor_PhiPS2", "plasticity_rdpi_licor_ETR", "plasticity_rdpi_licor_Fs", "plasticity_rdpi_licor_Fm.", "plasticity_rdpi_leaf_thickness_avg_mm_2023", "plasticity_rdpi_LMA_g_m2_2023", "plasticity_rdpi_leaf_mass_g_2023_log", "plasticity_rdpi_leaf_area_cm2_2023_log", "plasticity_rdpi_lower_stomata_count", "plasticity_rdpi_lower_stomata_pore_length_mean_um", "plasticity_rdpi_upper_stomata_presence", "plasticity_rdpi_upper_stomata_count_log", "plasticity_rdpi_upper_stomata_pore_length_mean_um", "plasticity_rdpi_upper_stomata_density_mm2_log", "plasticity_rdpi_lower_stomata_density_mm2", "plasticity_rdpi_stomata_density_both", "plasticity_rdpi_upper_stomata_density_over_total_density_log", "plasticity_rdpi_stomata_ratio_log", "plasticity_rdpi_DOY_Stage2_2024", "plasticity_rdpi_DOY_Stage3_2024", 
+"plasticity_rdpi_DOY_Stage6_2024", "plasticity_rdpi_DOY_Stage7_2024", 
+"plasticity_rdpi_DOY_last_budset_2024", "plasticity_rdpi_stage7_presence_2024", 
+"plasticity_rdpi_growing_season_days_2024")
+
+trait_names <- traits
+################
+
+trait_names <- gsub('Stage2_cGDD', 'Stage2_Bud_Flush_cGDD', trait_names)
+trait_names <- gsub('DOY_Stage2', 'Stage2_Bud_Flush_DOY', trait_names)
+trait_names <- gsub('DOY_Stage3', 'Stage3_Leaf_Emergence_DOY', trait_names)
+trait_names <- gsub('DOY_Stage6', 'Stage6_First_Budset_DOY', trait_names)
+trait_names <- gsub('DOY_Stage7', 'Stage7_Lammas_Growth_DOY', trait_names)
+trait_names <- gsub('stage7_presence', 'Stage7_Lammas_Growth_presence', trait_names)
+trait_names <- gsub('DOY_Stage8', 'Stage8_Budset_after_Lammas_DOY', trait_names)
+trait_names <- gsub('DOY_last_budset', 'Stage8_Final_Budset_DOY', trait_names)
+trait_names <- gsub('growing_season_days', 'Growing_Season_Days', trait_names)
+
+trait_names <- gsub('licor_', '', trait_names)
+trait_names <- gsub('Fm.', "Fm'", trait_names)
+trait_names <- gsub('upper', "Adaxial", trait_names)
+trait_names <- gsub('lower', "Abaxial", trait_names)
+trait_names <- gsub('stomata_ratio', "Stomata_ratio", trait_names)
+trait_names <- gsub('leaf', 'Leaf', trait_names)
+trait_names <- gsub('Phi', 'Φ', trait_names)
+
+# remove units
+trait_names <- gsub('_cm2', '', trait_names)
+trait_names <- gsub('_cm', '', trait_names)
+trait_names <- gsub('_mm2', '', trait_names)
+trait_names <- gsub('_m2', '', trait_names)
+trait_names <- gsub('_mm', '', trait_names)
+trait_names <- gsub('_um', '', trait_names)
+trait_names <- gsub('_g_', ' ', trait_names)
+
+trait_names <- gsub('plasticity_rdpi_', 'RDPI_', trait_names)
+
+trait_names <- gsub('_', ' ', trait_names)
+
+# check
+cbind(traits, trait_names)
+# make df to join them
+trait_names_df <- cbind.data.frame(traits, trait_names)
+rownames(trait_names_df) <- trait_names_df[,1]
+
+
+
+```
+
+# Statistical models for traits
+
+Test whether traits predict growth in each garden, and whether the trait-growth relationship varies by garden climate.
+
+
+## Do trait values predict growth in 2023?
+
+```{r model_growth_increment_2023}
+
+# get 2023 traits
+
+traits <- c("DOY_Stage2_2023", "DOY_Stage3_2023", "DOY_Stage6_2023", "DOY_Stage7_2023", "stage7_presence_2023", "DOY_last_budset_2023", "growing_season_days_2023", "licor_gsw", "licor_gbw", "licor_ETR", "licor_PhiPS2", "licor_Fs", "licor_Fm.", "leaf_thickness_avg_mm_2023", "LMA_g_m2_2023", "leaf_mass_g_2023", "leaf_area_cm2_2023", "lower_stomata_pore_length_mean_um", "upper_stomata_presence", "upper_stomata_pore_length_mean_um",  "upper_stomata_density_mm2", "lower_stomata_density_mm2", "stomata_ratio")
+
+
+# do these traits predict growth increment?
+
+```
+
+### Garden MAT
+
+Test whether garden climate, traits, and their interaction predict growth. An interaction effect suggests that the relationship between the trait and growth varies across garden climates.
+
+This analysis is pretty much repeated for traits, plasticity, each year, and three climate variables (MAT, MAP, TD). If modifying this code in the future - it would probably have been cleaner to create functions instead of repeating loops for each combination.
+
+```{r trait_MAT_2023}
+
+# reorder gardens by garden MAT
+tmp <- aggregate(dat$garden_MAT_2023, by = list(dat$MiniCG_Site_2023), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2023 <- factor(dat$MiniCG_Site_2023, levels = ord)
+
+# sites <- levels(dat$MiniCG_Site_2023)
+sites <- c("SWMN", "WI", "ID", "WYO", "EVERGREEN", "MSU", "OSU", "MORTON", "WSU", "PENN", "VA", "SU")
+
+sites.mat <- dat$garden_MAT_2023[match(sites, dat$MiniCG_Site)]
+
+
+# list to save results
+mods.mat <- list()
+# list to save summary plot for each trait with significant effects on fitness
+plots.summ <- list()
+
+# loop through traits
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  
+  print(paste('Model for:', trait))
+  
+  mod <- lmer(paste0('GrowthIncrement_2023 ~', trait,  '* garden_MAT_2023 + Pt + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+              data = dat)
+  
+  print(car::Anova(mod))
+  
+  p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std', 
+                   title = paste('2023 Growth ~ ', trait, sep = ''))
+  plot(p1)
+
+  mods.mat[[n]] <- mod
+  names(mods.mat)[n] <- trait
+  
+  #####################
+  # posthoc tests
+  # if either the climate or trait x climate are significant, run posthoc tests for each garden
+  mod.info <- Anova(mod)
+  # if any coefficients are significant, plot by garden
+  # need to change indexes if model is changed!
+  # 1 is trait effect, 2 is garden climate effect, 4 is trait x climate effect.
+  # Skip 3 which is ancestry - we already know this predicts height.
+  
+  if(mod.info$`Pr(>Chisq)`[1] <= 0.05 | mod.info$`Pr(>Chisq)`[2] <= 0.05 | mod.info$`Pr(>Chisq)`[4] <=0.05){
+    
+    # list to save plots for each site
+    plots.sub <- list()
+    
+    # dataframe to save outputs from posthoc tests
+    df.posthoc <- as.data.frame(matrix(ncol = 3, nrow = length(sites)))
+    rownames(df.posthoc) <- sites
+    colnames(df.posthoc) <- c('mat', 'slope', 'pval')
+    df.posthoc$mat <- sites.mat
+    
+    for(s in 1:length(sites)){
+      
+      site <- sites[s]
+      dat.sub <- subset(dat, MiniCG_Site_2023 == site)
+      # skip if site is missing data
+      if(sum(!is.na(dat.sub[,trait])) > 10){
+        mod.sub <- lmer(paste0('GrowthIncrement_2023 ~', trait, '+ Pt + (1 | block) + (1 | Genotype)'),
+                        data = dat.sub)
+        # get pval for trait
+        mod.sub.info <- Anova(mod.sub)
+        df.posthoc[site, 'pval'] <- mod.sub.info$`Pr(>Chisq)`[1]
+        
+        # get slopes from fixed effect of trait (effect on growth)
+        df.posthoc[site, 'slope'] <- fixef(mod.sub)[2]
+        
+        # make title pretty
+        maintitle <- paste(site, '\n', trait_names_df[trait, 'trait_names'], '\n', 'p = ', round(df.posthoc$pval[s], 3), sep = '')
+        maintitle <- paste(strwrap(maintitle, width = 30), collapse = '\n')   
+        
+        # plot data for individual garden
+        p <- ggplot(data = dat.sub, aes_string(y = 'GrowthIncrement_2023', x = trait, color = 'k2_tricho'), na.rm = TRUE) +
+          geom_point(na.rm = TRUE) +
+          scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+          ggtitle(maintitle) +
+          geom_smooth(color = 'black', lty = ifelse(df.posthoc$pval[s] <= 0.05, 1,2), method = 'lm', formula = y ~ x, na.rm = TRUE) +
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+          theme(axis.title.x = element_blank())
+        
+        #plot(p)
+        plots.sub[[s]] <- p
+      }
+    }
+
+    # pvals are adjusted for summary plot
+    df.posthoc$pvals.adj <- p.adjust(df.posthoc$pval, method = 'BH') 
+    
+    # plot panel with relationship for each garden
+    # remove empty plots
+    plots.sub <- plots.sub[lengths(plots.sub)>0]
+    # plot in grid
+    p1 <- grid.arrange(grobs = plots.sub, ncol = 4)
+    plot(p1)
+    
+    # setup text showing significance
+    sig_text <- paste0('Trait ', pval_stars(mod.info[1, 'Pr(>Chisq)']), '\n',
+           'Climate ', pval_stars(mod.info[2, 'Pr(>Chisq)']), '\n',
+           'Trait x Climate ', pval_stars(mod.info[4, 'Pr(>Chisq)']))
+    
+    # wrap title
+    maintitle <- trait_names_df[trait, 'trait_names']
+    maintitle <- paste(strwrap(maintitle, width = 30), collapse = '\n')
+    
+    
+    # plot slope of fitness relationship vs climate
+    p2 <- ggplot(df.posthoc, aes(x = mat, y = slope), na.rm = TRUE) +
+      geom_smooth(method = 'lm', col = 'black', na.rm = TRUE) +
+      geom_hline(yintercept = 0, lty = 2) +
+      geom_point(size = 5, stroke = 2, shape = ifelse(df.posthoc$pvals.adj <= 0.05, 16, 1), aes(col = mat), na.rm = TRUE) +
+      scale_color_gradient2(high = "red2", mid = "grey", low = "blue2", midpoint = mean(range(sites.mat)), limits = range_mat, name = 'Garden MAT (°C)') +
+      ggtitle(maintitle,
+              subtitle = sig_text) +
+      xlab('Garden MAT') +
+      ylab('Effect on Growth Increment') +
+      geom_text_repel(label = rownames(df.posthoc), aes(x = mat, y = slope), box.padding = 0.5, min.segment.length = 1, size = 4) +
+        theme(plot.title = element_text(size = 15),
+        plot.subtitle = element_text(size = 10),
+        legend.position = 'none')
+    plot(p2)
+    
+    plots.summ[[n]] <- p2
+    names(plots.summ)[n] <- trait
+    
+    first <- FALSE # if we have made a plot, the next one isn't first
+
+    
+    # add legend
+    leg_plot <- ggplot(df.posthoc, aes(x = mat, y = slope),  na.rm = TRUE) +
+      geom_point(aes(color = mat))+
+      scale_color_gradient2(high = "red2", mid = "grey", low = "blue2", midpoint = mean(range(sites.mat)), limits = range_mat, name = 'Garden MAT (°C)') +
+      theme(legend.position = 'right')
+    
+    legend <- cowplot::get_legend(leg_plot)
+    
+  }
+}
+
+plots.summ <- plots.summ[lengths(plots.summ)>0]
+
+# add legend to beginning of plot list
+
+plots2 <- plots.summ
+plots2[[length(plots.summ)+1]] <- legend
+
+p3 <- grid.arrange(grobs = plots2, ncol = 4)
+plot(p3)
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxMAT_2023.png', p3, height = 12, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxMAT_2023.pdf', p3, height = 12, width = 14)
+
+
+# rename plots list for later use
+plots.trait.mat.23 <- plots.summ
+
+```
+
+
+### Garden MAP
+
+```{r trait_MAP_2023}
+
+###################
+
+# with garden MAP
+
+# reorder gardens by garden MAP
+tmp <- aggregate(dat$garden_MAP_2023, by = list(dat$MiniCG_Site_2023), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2023 <- factor(dat$MiniCG_Site_2023, levels = ord)
+
+sites.map <- dat$garden_MAP_2023[match(sites, dat$MiniCG_Site)]
+
+
+# list to save results
+mods.map <- list()
+# list to save summary plot for each trait with significant effects on fitness
+plots.summ <- list()
+
+# loop through traits
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  
+  print(paste('Model for:', trait))
+
+  
+  mod <- lmer(paste0('GrowthIncrement_2023 ~', trait,  '* garden_MAP_2023 + Pt + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+              data = dat)
+  
+  print(car::Anova(mod))
+  
+  p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std', 
+                   title = paste('2023 Growth ~ ', trait, sep = ''))
+  plot(p1)
+
+  mods.map[[n]] <- mod
+  names(mods.map)[n] <- trait
+  
+  #####################
+  # posthoc tests
+  # if either the climate or trait x climate are significant, run posthoc tests for each garden
+  mod.info <- Anova(mod)
+  # if any coefficients are significant, plot by garden
+  # need to change indexes if model is changed!
+  # 1 is trait effect, 2 is garden climate effect, 4 is trait x climate effect.
+  # Skip 3 which is ancestry - we already know this predicts height.
+  
+  if(mod.info$`Pr(>Chisq)`[1] <= 0.05 | mod.info$`Pr(>Chisq)`[2] <= 0.05 | mod.info$`Pr(>Chisq)`[4] <=0.05){
+    
+    # list to save plots for each site
+    plots.sub <- list()
+    
+    # dataframe to save outputs from posthoc tests
+    df.posthoc <- as.data.frame(matrix(ncol = 3, nrow = length(sites)))
+    rownames(df.posthoc) <- sites
+    colnames(df.posthoc) <- c('map', 'slope', 'pval')
+    df.posthoc$map <- sites.map
+    
+    for(s in 1:length(sites)){
+      
+      site <- sites[s]
+      dat.sub <- subset(dat, MiniCG_Site_2023 == site)
+      # skip if site is missing data
+      if(sum(!is.na(dat.sub[,trait])) > 10){
+        mod.sub <- lmer(paste0('GrowthIncrement_2023 ~', trait, '+ Pt + (1 | block) + (1 | Genotype)'),
+                        data = dat.sub)
+        # get pval for trait
+        mod.sub.info <- Anova(mod.sub)
+        df.posthoc[site, 'pval'] <- mod.sub.info$`Pr(>Chisq)`[1]
+        
+        # get slopes from fixed effect of trait (effect on growth)
+        df.posthoc[site, 'slope'] <- fixef(mod.sub)[2]
+        
+        # make title pretty
+        maintitle <- paste(site, '\n', trait_names_df[trait, 'trait_names'], '\n', 'p = ', round(df.posthoc$pval[s], 3), sep = '')
+        maintitle <- paste(strwrap(maintitle, width = 30), collapse = '\n')  
+        
+        # plot
+        p <- ggplot(data = dat.sub, aes_string(y = 'GrowthIncrement_2023', x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+          geom_point(na.rm = TRUE) +
+          scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+          ggtitle(maintitle) +
+          geom_smooth(color = 'black', lty = ifelse(df.posthoc$pval[s] <= 0.05, 1,2), method = 'lm', formula = y ~ x, na.rm = TRUE) +
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+          theme(axis.title.x = element_blank())
+        
+        #plot(p)
+        plots.sub[[s]] <- p
+      }
+    }
+
+    # pvals are adjusted for summary plot
+    df.posthoc$pvals.adj <- p.adjust(df.posthoc$pval, method = 'BH') 
+    
+    # plot panel with relationship for each garden
+    # remove empty plots
+    plots.sub <- plots.sub[lengths(plots.sub)>0]
+    # plot in grid
+    p1 <- grid.arrange(grobs = plots.sub, ncol = 4)
+    plot(p1)
+    
+    # setup text showing significance
+    sig_text <- paste0('Trait ', pval_stars(mod.info[1, 'Pr(>Chisq)']), '\n',
+                       'Climate ', pval_stars(mod.info[2, 'Pr(>Chisq)']), '\n',
+                       'Trait x Climate ', pval_stars(mod.info[4, 'Pr(>Chisq)']))
+    
+     # wrap title
+    maintitle <- trait_names_df[trait, 'trait_names']
+    maintitle <- paste(strwrap(maintitle, width = 30), collapse = '\n')
+    
+    # plot slope of fitness relationship vs climate
+    p2 <- ggplot(df.posthoc, aes(x = map, y = slope), na.rm  = TRUE) +
+            geom_smooth(method = 'lm', col = 'black', na.rm = TRUE) +
+      geom_hline(yintercept = 0, lty = 2) +
+      geom_point(size = 5, stroke = 2, shape = ifelse(df.posthoc$pvals.adj <= 0.05, 16, 1), aes(col = map), na.rm = TRUE) +
+      scale_color_gradient2(high = "steelblue2",  mid = 'grey', low = "sienna3", midpoint = mean(range(sites.map)), limits = range_map,  name = 'Garden MAP') +
+      ggtitle(maintitle,
+              subtitle = sig_text) +
+      xlab('Garden MAP') +
+      ylab('Effect on Growth Increment') +
+      geom_text_repel(label = rownames(df.posthoc), aes(x = map, y = slope), box.padding = 0.5, min.segment.length = 1, size = 4) +
+      theme(plot.title = element_text(size = 15),
+        plot.subtitle = element_text(size = 10),
+        legend.position = 'none')
+    plot(p2)
+    
+    plots.summ[[n]] <- p2
+    names(plots.summ)[n] <- trait
+    
+    # add legend
+    leg_plot <- ggplot(df.posthoc, aes(x = map, y = slope), na.rm  = TRUE) +
+      geom_point(aes(color = map))+
+      scale_color_gradient2(high = "steelblue2",  mid = 'grey', low = "sienna3", midpoint = mean(range(sites.map)), limits = range_map, name = 'Garden MAP (mm)') +
+      theme(legend.position = 'right')
+    
+    legend <- cowplot::get_legend(leg_plot)
+    
+  }
+}
+
+# significant interaction for DPY stage6, DOY last budset, gsw, gbw, PhiPS2, Fs, LMA, leaf mass, leaf area, lower pore length, upper pore length
+plots.summ <- plots.summ[lengths(plots.summ)>0]
+
+# add legend to beginning of plot list
+
+plots2 <- plots.summ
+plots2[[length(plots.summ)+1]] <- legend
+
+p3 <- grid.arrange(grobs = plots2, ncol = 4)
+plot(p3)
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxMAP_2023.png', p3, height = 12, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxMAP_2023.pdf', p3, height = 12, width = 14)
+
+# rename plots list for later use
+plots.trait.map.23 <- plots.summ
+
+```
+
+### Garden TD
+
+```{r trait_TD_2023}
+
+###################
+
+
+# with garden TD
+
+# reorder gardens by garden TD
+tmp <- aggregate(dat$garden_TD_2023, by = list(dat$MiniCG_Site_2023), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2023 <- factor(dat$MiniCG_Site_2023, levels = ord)
+
+sites.td <- dat$garden_TD_2023[match(sites, dat$MiniCG_Site)]
+
+
+# list to save results
+mods.td <- list()
+# list to save summary plot for each trait with significant effects on fitness
+plots.summ <- list()
+
+# loop through traits
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  
+  print(paste('Model for:', trait))
+
+  
+  mod <- lmer(paste0('GrowthIncrement_2023 ~', trait,  '* garden_TD_2023 + Pt + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+              data = dat)
+  
+  print(car::Anova(mod))
+  
+  p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std', 
+                   title = paste('2023 Growth ~ ', trait, sep = ''))
+  plot(p1)
+
+  mods.td[[n]] <- mod
+  names(mods.td)[n] <- trait
+  
+  #####################
+  # posthoc tests
+  # if either the climate or trait x climate are significant, run posthoc tests for each garden
+  mod.info <- Anova(mod)
+  # if any coefficients are significant, plot by garden
+  # need to change indexes if model is changed!
+  # 1 is trait effect, 2 is garden climate effect, 4 is trait x climate effect.
+  # Skip 3 which is ancestry - we already know this predicts height.
+  
+  if(mod.info$`Pr(>Chisq)`[1] <= 0.05 | mod.info$`Pr(>Chisq)`[2] <= 0.05 | mod.info$`Pr(>Chisq)`[4] <=0.05){
+    
+    # list to save plots for each site
+    plots.sub <- list()
+    
+    # dataframe to save outputs from posthoc tests
+    df.posthoc <- as.data.frame(matrix(ncol = 3, nrow = length(sites)))
+    rownames(df.posthoc) <- sites
+    colnames(df.posthoc) <- c('td', 'slope', 'pval')
+    df.posthoc$td <- sites.td
+    
+    for(s in 1:length(sites)){
+      
+      site <- sites[s]
+      dat.sub <- subset(dat, MiniCG_Site_2023 == site)
+      # skip if site is missing data
+      if(sum(!is.na(dat.sub[,trait])) > 10){
+        mod.sub <- lmer(paste0('GrowthIncrement_2023 ~', trait, '+ Pt + (1 | block) + (1 | Genotype)'),
+                        data = dat.sub)
+        # get pval for trait
+        mod.sub.info <- Anova(mod.sub)
+        df.posthoc[site, 'pval'] <- mod.sub.info$`Pr(>Chisq)`[1]
+        
+        # get slopes from fixed effect of trait (effect on growth)
+        df.posthoc[site, 'slope'] <- fixef(mod.sub)[2]
+        
+        # make title pretty
+        maintitle <- paste(site, '\n', trait_names_df[trait, 'trait_names'], '\n', 'p = ', round(df.posthoc$pval[s], 3), sep = '')
+        maintitle <- paste(strwrap(maintitle, width = 30), collapse = '\n')  
+        
+        # plot
+        p <- ggplot(data = dat.sub, aes_string(y = 'GrowthIncrement_2023', x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+          geom_point(na.rm = TRUE) +
+          scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+          ggtitle(maintitle) +
+          geom_smooth(color = 'black', lty = ifelse(df.posthoc$pval[s] <= 0.05, 1,2), method = 'lm', formula = y ~ x, na.rm = TRUE) +
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+          theme(axis.title.x = element_blank())
+        
+        #plot(p)
+        plots.sub[[s]] <- p
+      }
+    }
+
+    # pvals are adjusted for summary plot
+    df.posthoc$pvals.adj <- p.adjust(df.posthoc$pval, method = 'BH') 
+    
+    # plot panel with relationship for each garden
+    # remove empty plots
+    plots.sub <- plots.sub[lengths(plots.sub)>0]
+    # plot in grid
+    p1 <- grid.arrange(grobs = plots.sub, ncol = 4)
+    plot(p1)
+    
+    # setup text showing significance
+    sig_text <- paste0('Trait ', pval_stars(mod.info[1, 'Pr(>Chisq)']), '\n',
+                       'Climate ', pval_stars(mod.info[2, 'Pr(>Chisq)']), '\n',
+                       'Trait x Climate ', pval_stars(mod.info[4, 'Pr(>Chisq)']))
+    
+     # wrap title
+    maintitle <- trait_names_df[trait, 'trait_names']
+    maintitle <- paste(strwrap(maintitle, width = 30), collapse = '\n')
+    
+    # plot slope of fitness relationship vs climate
+    p2 <- ggplot(df.posthoc, aes(x = td, y = slope), na.rm  = TRUE) +
+      geom_smooth(method = 'lm', col = 'black', na.rm = TRUE) +
+      geom_hline(yintercept = 0, lty = 2) +
+      geom_point(size = 5, stroke = 2, shape = ifelse(df.posthoc$pvals.adj <= 0.05, 16, 1), aes(col = td), na.rm = TRUE) +
+      scale_color_gradient2(high = "orchid4",  mid = 'grey', low = "palegreen4", midpoint = mean(range(sites.td)), limits = range_td, name = 'Garden TD (°C)') +
+      ggtitle(maintitle,
+              subtitle = sig_text) +
+      xlab('Garden TD') +
+      ylab('Effect on Growth Increment') +
+      geom_text_repel(label = rownames(df.posthoc), aes(x = td, y = slope), box.padding = 0.5, min.segment.length = 1, size = 4) +
+      theme(plot.title = element_text(size = 15),
+            plot.subtitle = element_text(size = 10),
+            legend.position = 'none')
+    plot(p2)
+    
+    plots.summ[[n]] <- p2
+    names(plots.summ)[n] <- trait
+    
+     # add legend
+    leg_plot <- ggplot(df.posthoc, aes(x = td, y = slope), na.rm  = TRUE) +
+      geom_point(aes(color = td))+
+      scale_color_gradient2(high = "orchid4",  mid = 'grey', low = "palegreen4", midpoint = mean(range(sites.td)), limits = range_td, name = 'Garden TD (°C)') +
+      theme(legend.position = 'right')
+    
+    legend <- cowplot::get_legend(leg_plot)
+    
+  }
+}
+
+# significant interaction for DPY stage6, DOY last budset, gsw, gbw, PhiPS2, Fs, LMA, leaf mass, leaf area, lower pore length, upper pore length
+plots.summ <- plots.summ[lengths(plots.summ)>0]
+
+# add legend to beginning of plot list
+
+plots2 <- plots.summ
+plots2[[length(plots.summ)+1]] <- legend
+
+p3 <- grid.arrange(grobs = plots2, ncol = 4)
+plot(p3)
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxTD_2023.png', p3, height = 10, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxTD_2023.pdf', p3, height = 10, width = 14)
+
+# rename plots list for later use
+plots.trait.td.23 <- plots.summ
+
+```
+
+
+## Do trait values predict growth in 2024?
+
+
+```{r model_growth_increment_2024}
+
+# get 2024 traits
+traits <- c("DOY_Stage2_2024", "DOY_Stage3_2024", "DOY_Stage6_2024", "DOY_Stage7_2024", "stage7_presence_2024", "DOY_last_budset_2024", "growing_season_days_2024")
+
+
+# SWMN was only checked once for stage6 - remove these points
+dat[dat$MiniCG_Site == 'SWMN', 'DOY_Stage6_2024'] <- NA
+dat[dat$MiniCG_Site == 'SWMN', 'DOY_last_budset_2024'] <- NA
+
+# do these traits predict growth increment?
+
+```
+
+
+### Garden MAT
+```{r trait_MAT_2024}
+
+# reorder gardens by garden MAT
+tmp <- aggregate(dat$garden_MAT_2024, by = list(dat$MiniCG_Site_2024), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2024 <- factor(dat$MiniCG_Site_2024, levels = ord)
+
+# sites <- levels(dat$MiniCG_Site_2024)
+sites <- c("WI", "ID", "WYO", "EVERGREEN", "MSU", "MORTON", "PENN", "SU")
+
+sites.mat <- dat$garden_MAT_2024[match(sites, dat$MiniCG_Site)]
+
+# list to save results
+mods.mat <- list()
+# list to save summary plot for each trait with significant effects on fitness
+plots.summ <- list()
+
+
+# loop through traits
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  
+  print(paste('Model for:', trait))
+  
+  
+  mod <- lmer(paste0('GrowthIncrement_2024 ~', trait,  '* garden_MAT_2024 + Pt + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+              data = dat)
+  
+  print(car::Anova(mod))
+  
+  p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std', 
+                   title = paste('2024 Growth ~ ', trait, sep = ''))
+  plot(p1)
+
+  mods.mat[[n]] <- mod
+  names(mods.mat)[n] <- trait
+  
+  #####################
+  # posthoc tests
+  # if either the climate or trait x climate are significant, run posthoc tests for each garden
+  mod.info <- Anova(mod)
+  # if any coefficients are significant, plot by garden
+  # need to change indexes if model is changed!
+  # 1 is trait effect, 2 is garden climate effect, 4 is trait x climate effect.
+  # Skip 3 which is ancestry - we already know this predicts height.
+  
+  if(mod.info$`Pr(>Chisq)`[1] <= 0.05 | mod.info$`Pr(>Chisq)`[2] <= 0.05 | mod.info$`Pr(>Chisq)`[4] <=0.05){
+    
+    # list to save plots for each site
+    plots.sub <- list()
+    
+    # dataframe to save outputs from posthoc tests
+    df.posthoc <- as.data.frame(matrix(ncol = 3, nrow = length(sites)))
+    rownames(df.posthoc) <- sites
+    colnames(df.posthoc) <- c('mat', 'slope', 'pval')
+    df.posthoc$mat <- sites.mat
+    
+    for(s in 1:length(sites)){
+      
+      site <- sites[s]
+      dat.sub <- subset(dat, MiniCG_Site_2024 == site)
+      # skip if site is missing data
+      if(sum(!is.na(dat.sub[,trait])) > 10){
+        mod.sub <- lmer(paste0('GrowthIncrement_2024 ~', trait, '+ Pt + (1 | block) + (1 | Genotype)'),
+                        data = dat.sub)
+        # get pval for trait
+        mod.sub.info <- Anova(mod.sub)
+        df.posthoc[site, 'pval'] <- mod.sub.info$`Pr(>Chisq)`[1]
+        
+        # get slopes from fixed effect of trait (effect on growth)
+        df.posthoc[site, 'slope'] <- fixef(mod.sub)[2]
+        
+        # make main title pretty
+        maintitle <- paste(site, '\n', trait_names_df[trait, 'trait_names'], '\n', 'p = ', round(df.posthoc$pval[s], 3), sep = '')
+        maintitle <- paste(strwrap(maintitle, width = 30), collapse = '\n')
+        
+        # plot
+        p <- ggplot(data = dat.sub, aes_string(y = 'GrowthIncrement_2024', x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+          geom_point(na.rm = TRUE) +
+          scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+          ggtitle(maintitle) +
+          geom_smooth(color = 'black', lty = ifelse(df.posthoc$pval[s] <= 0.05, 1,2), method = 'lm', formula = y ~ x, na.rm = TRUE) +
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+          theme(axis.title.x = element_blank())
+        
+        #plot(p)
+        plots.sub[[s]] <- p
+      }
+    }
+    # pvals are adjusted for summary plot
+    df.posthoc$pvals.adj <- p.adjust(df.posthoc$pval, method = 'BH') 
+    
+    # plot panel with relationship for each garden
+    # remove empty plots
+    plots.sub <- plots.sub[lengths(plots.sub)>0]
+    # plot in grid
+    p1 <- grid.arrange(grobs = plots.sub, ncol = 4)
+    plot(p1)
+    
+    # setup text showing significance
+    sig_text <- paste0('Trait ', pval_stars(mod.info[1, 'Pr(>Chisq)']), '\n',
+           'Climate ', pval_stars(mod.info[2, 'Pr(>Chisq)']), '\n',
+           'Trait x Climate ', pval_stars(mod.info[4, 'Pr(>Chisq)']))
+    # wrap title
+    maintitle <- trait_names_df[trait, 'trait_names']
+    maintitle <- paste(strwrap(maintitle, width = 30), collapse = '\n')
+    
+    # legend position
+    #only plot for first graph
+    if(first == TRUE){
+      leg_pos <- 'left'
+    }else{
+      leg_pos <- 'none'
+    }
+    
+    # plot slope of fitness relationship vs climate
+    p2 <- ggplot(df.posthoc, aes(x = mat, y = slope), na.rm  = TRUE) +
+      geom_smooth(method = 'lm', col = 'black', na.rm = TRUE) +
+      geom_hline(yintercept = 0, lty = 2) +
+      geom_point(size = 5, stroke = 2, shape = ifelse(df.posthoc$pvals.adj <= 0.05, 16, 1), aes(col = mat), na.rm = TRUE) +
+      scale_color_gradient2(high = "red2", mid = "grey", low = "blue2", midpoint = mean(range(sites.mat)), limits = range_mat, name = 'Garden MAT (°C)') +
+      ggtitle(maintitle,
+              subtitle = sig_text) +
+      xlab('Garden MAT') +
+      ylab('Effect on Growth Increment') +
+      geom_text_repel(label = rownames(df.posthoc), aes(x = mat, y = slope), box.padding = 0.5, min.segment.length = 1, size = 4) +
+      theme(plot.title = element_text(size = 15),
+            plot.subtitle = element_text(size = 10),
+            legend.position = 'none'
+      )
+    plot(p2)
+    
+    plots.summ[[n]] <- p2
+    names(plots.summ)[n] <- trait
+    
+    # add legend
+    leg_plot <- ggplot(df.posthoc, aes(x = mat, y = slope), na.rm  = TRUE) +
+      geom_point(aes(color = mat))+
+      scale_color_gradient2(high = "red2", mid = "grey", low = "blue2", midpoint = mean(range(sites.mat)), name = 'Garden MAT (°C)', limits = range_mat) +
+      theme(legend.position = 'right')
+    
+    legend <- cowplot::get_legend(leg_plot)
+    
+  }
+}
+
+# remove empty plots
+plots.summ <- plots.summ[lengths(plots.summ)>0]
+
+# add legend to beginning of plot list
+plots.summ[[length(plots.summ)+1]] <- legend
+
+p3 <- grid.arrange(grobs = plots.summ, ncol = 4)
+plot(p3)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxMAT_2024.png', p3, height = 4, width = 12)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxMAT_2024.pdf', p3, height = 4, width = 12)
+
+# rename plots list for later use
+plots.trait.mat.24 <- plots.summ
+
+```
+
+### Garden MAP
+
+```{r trait_MAP_2024}
+
+###################
+
+
+# with garden MAP
+
+# reorder gardens by garden MAP
+tmp <- aggregate(dat$garden_MAP_2024, by = list(dat$MiniCG_Site_2024), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2024 <- factor(dat$MiniCG_Site_2024, levels = ord)
+
+sites.map <- dat$garden_MAP_2024[match(sites, dat$MiniCG_Site)]
+
+
+# list to save results
+mods.map <- list()
+# list to save summary plot for each trait with significant effects on fitness
+plots.summ <- list()
+
+# loop through traits
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  
+  print(paste('Model for:', trait))
+  
+  
+  mod <- lmer(paste0('GrowthIncrement_2024 ~', trait,  '* garden_MAP_2024 + Pt + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+              data = dat)
+  
+  print(car::Anova(mod))
+  
+  p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std', 
+                   title = paste('2024 Growth ~ ', trait, sep = ''))
+  plot(p1)
+
+  mods.map[[n]] <- mod
+  names(mods.map)[n] <- trait
+  
+  #####################
+  # posthoc tests
+  # if either the climate or trait x climate are significant, run posthoc tests for each garden
+  mod.info <- Anova(mod)
+  # if any coefficients are significant, plot by garden
+  # need to change indexes if model is changed!
+  # 1 is trait effect, 2 is garden climate effect, 4 is trait x climate effect.
+  # Skip 3 which is ancestry - we already know this predicts height.
+  
+  if(mod.info$`Pr(>Chisq)`[1] <= 0.05 | mod.info$`Pr(>Chisq)`[2] <= 0.05 | mod.info$`Pr(>Chisq)`[4] <=0.05){
+    
+    # list to save plots for each site
+    plots.sub <- list()
+    
+    # dataframe to save outputs from posthoc tests
+    df.posthoc <- as.data.frame(matrix(ncol = 3, nrow = length(sites)))
+    rownames(df.posthoc) <- sites
+    colnames(df.posthoc) <- c('map', 'slope', 'pval')
+    df.posthoc$map <- sites.map
+    
+    # make main title pretty
+    maintitle <- paste(site, '\n', trait_names_df[trait, 'trait_names'], '\n', 'p = ', round(df.posthoc$pval[s], 3), sep = '')
+    maintitle <- paste(strwrap(maintitle, width = 30), collapse = '\n')
+    
+    for(s in 1:length(sites)){
+      
+      site <- sites[s]
+      dat.sub <- subset(dat, MiniCG_Site_2024 == site)
+      # skip if site is missing data
+      if(sum(!is.na(dat.sub[,trait])) > 10){
+        mod.sub <- lmer(paste0('GrowthIncrement_2024 ~', trait, '+ Pt + (1 | block) + (1 | Genotype)'),
+                        data = dat.sub)
+        # get pval for trait
+        mod.sub.info <- Anova(mod.sub)
+        df.posthoc[site, 'pval'] <- mod.sub.info$`Pr(>Chisq)`[1]
+        
+        # get slopes from fixed effect of trait (effect on growth)
+        df.posthoc[site, 'slope'] <- fixef(mod.sub)[2]
+        
+        # plot
+        p <- ggplot(data = dat.sub, aes_string(y = 'GrowthIncrement_2024', x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+          geom_point(na.rm = TRUE) +
+          scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+         ggtitle(maintitle) +
+          geom_smooth(color = 'black', lty = ifelse(df.posthoc$pval[s] <= 0.05, 1,2), method = 'lm', formula = y ~ x, na.rm = TRUE) +
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+          theme(axis.title.x = element_blank())
+        
+        #plot(p)
+        plots.sub[[s]] <- p
+      }
+    }
+
+    # pvals are adjusted for summary plot
+    df.posthoc$pvals.adj <- p.adjust(df.posthoc$pval, method = 'BH') 
+    
+    # plot panel with relationship for each garden
+    # remove empty plots
+    plots.sub <- plots.sub[lengths(plots.sub)>0]
+    # plot in grid
+    p1 <- grid.arrange(grobs = plots.sub, ncol = 4)
+    plot(p1)
+    
+    # setup text showing significance
+    sig_text <- paste0('Trait ', pval_stars(mod.info[1, 'Pr(>Chisq)']), '\n',
+                       'Climate ', pval_stars(mod.info[2, 'Pr(>Chisq)']), '\n',
+                       'Trait x Climate ', pval_stars(mod.info[4, 'Pr(>Chisq)']))
+    
+    # wrap title
+    maintitle <- trait_names_df[trait, 'trait_names']
+    maintitle <- paste(strwrap(maintitle, width = 30), collapse = '\n')
+    
+    # plot slope of fitness relationship vs climate
+    p2 <- ggplot(df.posthoc, aes(x = map, y = slope), na.rm  = TRUE) +
+      geom_smooth(method = 'lm', col = 'black', na.rm = TRUE) +
+      geom_hline(yintercept = 0, lty = 2) +
+      geom_point(size = 5, stroke = 2, shape = ifelse(df.posthoc$pvals.adj <= 0.05, 16, 1), aes(col = map), na.rm = TRUE) +
+      scale_color_gradient2(high = "steelblue2",  mid = 'grey', low = "sienna3", midpoint = mean(range(sites.map)), limits = range_map, name = 'Garden MAP (mm)') +
+      ggtitle(maintitle,
+              subtitle = sig_text)+
+      xlab('Garden MAP') +
+      ylab('Effect on Growth Increment') +
+      geom_text_repel(label = rownames(df.posthoc), aes(x = map, y = slope), box.padding = 0.5, min.segment.length = 1, size = 4) +
+      theme(plot.title = element_text(size = 15),
+            plot.subtitle = element_text(size = 10),
+            legend.position = 'none')
+    plot(p2)
+    
+    # add legend
+    leg_plot <- ggplot(df.posthoc, aes(x = map, y = slope), na.rm  = TRUE) +
+      geom_point(aes(color = map), na.rm = TRUE)+
+      scale_color_gradient2(high = "steelblue2",  mid = 'grey', low = "sienna3", midpoint = mean(range(sites.map)), limits = range_map, name = 'Garden MAP (mm)') +
+      theme(legend.position = 'right')
+    
+    legend <- cowplot::get_legend(leg_plot)
+    
+    
+    plots.summ[[n]] <- p2
+    names(plots.summ)[n] <- trait
+    
+  }
+}
+
+
+# significant interaction for DOY stage6, DOY last budset, gsw, gbw, PhiPS2, Fs, LMA, leaf mass, leaf area, lower pore length, upper pore length
+plots.summ <- plots.summ[lengths(plots.summ)>0]
+
+# add legend to beginning of plot list
+
+plots.summ[[length(plots.summ)+1]] <- legend
+
+# there is only one significant trait
+
+p3 <- grid.arrange(grobs = plots.summ, ncol = 2)
+plot(p3)
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxMAP_2024.png', p3, height = 4, width = 6)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxMAP_2024.pdf', p3, height = 4, width = 6)
+
+# rename plots list for later use
+plots.trait.map.24 <- plots.summ
+
+```
+
+### Garden TD
+
+```{r trait_TD_2024}
+
+###################
+
+# with garden TD
+
+# reorder gardens by garden TD
+tmp <- aggregate(dat$garden_TD_2024, by = list(dat$MiniCG_Site_2024), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2024 <- factor(dat$MiniCG_Site_2024, levels = ord)
+
+sites.td <- dat$garden_TD_2024[match(sites, dat$MiniCG_Site)]
+
+
+# list to save results
+mods.td <- list()
+# list to save summary plot for each trait with significant effects on fitness
+plots.summ <- list()
+
+# loop through traits
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  
+  print(paste('Model for:', trait))
+  
+  mod <- lmer(paste0('GrowthIncrement_2024 ~', trait,  '* garden_TD_2024 + Pt + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+              data = dat)
+  
+  print(car::Anova(mod))
+  
+  p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std', 
+                   title = paste('2024 Growth ~ ', trait, sep = ''))
+  plot(p1)
+
+  mods.td[[n]] <- mod
+  names(mods.td)[n] <- trait
+  
+  #####################
+  # posthoc tests
+  # if either the climate or trait x climate are significant, run posthoc tests for each garden
+  mod.info <- Anova(mod)
+  # if any coefficients are significant, plot by garden
+  # need to change indexes if model is changed!
+  # 1 is trait effect, 2 is garden climate effect, 4 is trait x climate effect.
+  # Skip 3 which is ancestry - we already know this predicts height.
+  
+  if(mod.info$`Pr(>Chisq)`[1] <= 0.05 | mod.info$`Pr(>Chisq)`[2] <= 0.05 | mod.info$`Pr(>Chisq)`[4] <=0.05){
+    
+    # list to save plots for each site
+    plots.sub <- list()
+    
+    # dataframe to save outputs from posthoc tests
+    df.posthoc <- as.data.frame(matrix(ncol = 3, nrow = length(sites)))
+    rownames(df.posthoc) <- sites
+    colnames(df.posthoc) <- c('td', 'slope', 'pval')
+    df.posthoc$td <- sites.td
+    
+    # make main title pretty
+    maintitle <- paste(site, '\n', trait_names_df[trait, 'trait_names'], '\n', 'p = ', round(df.posthoc$pval[s], 3), sep = '')
+    maintitle <- paste(strwrap(maintitle, width = 30), collapse = '\n')
+    
+    for(s in 1:length(sites)){
+      
+      site <- sites[s]
+      dat.sub <- subset(dat, MiniCG_Site_2024 == site)
+      # skip if site is missing data
+      if(sum(!is.na(dat.sub[,trait])) > 10){
+        mod.sub <- lmer(paste0('GrowthIncrement_2024 ~', trait, '+ Pt + (1 | block) + (1 | Genotype)'),
+                        data = dat.sub)
+        # get pval for trait
+        mod.sub.info <- Anova(mod.sub)
+        df.posthoc[site, 'pval'] <- mod.sub.info$`Pr(>Chisq)`[1]
+        
+        # get slopes from fixed effect of trait (effect on growth)
+        df.posthoc[site, 'slope'] <- fixef(mod.sub)[2]
+        
+        # plot
+        p <- ggplot(data = dat.sub, aes_string(y = 'GrowthIncrement_2024', x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+          geom_point(na.rm = TRUE) +
+          scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+         ggtitle(maintitle) +
+          geom_smooth(color = 'black', lty = ifelse(df.posthoc$pval[s] <= 0.05, 1,2), method = 'lm', formula = y ~ x, na.rm = TRUE)
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+          theme(axis.title.x = element_blank())
+        
+        #plot(p)
+        plots.sub[[s]] <- p
+      }
+    }
+
+    # pvals are adjusted for summary plot
+    df.posthoc$pvals.adj <- p.adjust(df.posthoc$pval, method = 'BH') 
+    
+    # plot panel with relationship for each garden
+    # remove empty plots
+    plots.sub <- plots.sub[lengths(plots.sub)>0]
+    # plot in grid
+    p1 <- grid.arrange(grobs = plots.sub, ncol = 4)
+    plot(p1)
+    
+    # setup text showing significance
+    sig_text <- paste0('Trait ', pval_stars(mod.info[1, 'Pr(>Chisq)']), '\n',
+                       'Climate ', pval_stars(mod.info[2, 'Pr(>Chisq)']), '\n',
+                       'Trait x Climate ', pval_stars(mod.info[4, 'Pr(>Chisq)']))
+    
+    # wrap title
+    maintitle <- trait_names_df[trait, 'trait_names']
+    maintitle <- paste(strwrap(maintitle, width = 30), collapse = '\n')
+    
+    
+    # plot slope of fitness relationship vs climate
+    p2 <- ggplot(df.posthoc, aes(x = td, y = slope), na.rm  = TRUE) +
+      geom_point(size = 5, stroke = 2, shape = ifelse(df.posthoc$pvals.adj <= 0.05, 16, 1), aes(color = td), na.rm = TRUE) +
+      geom_smooth(method = 'lm', col = 'black', na.rm = TRUE) +
+      geom_hline(yintercept = 0, lty = 2) +
+      scale_color_gradient2(high = "orchid4",  mid = 'grey', low = "palegreen4", midpoint = mean(range(sites.td)), limits = range_td, name = 'Garden TD (°C)') +
+      ggtitle(maintitle,
+              subtitle = sig_text)+
+      xlab('Garden TD') +
+      ylab('Effect on Growth Increment') +
+      geom_text_repel(label = rownames(df.posthoc), aes(x = td, y = slope), box.padding = 0.5, min.segment.length = 1, size = 4) +
+      theme(plot.title = element_text(size = 15),
+            plot.subtitle = element_text(size = 10),
+            legend.position = 'none')
+    plot(p2)
+    
+    plots.summ[[n]] <- p2
+    names(plots.summ)[n] <- trait
+    
+    
+     # add legend
+    leg_plot <- ggplot(df.posthoc, aes(x = td, y = slope), na.rm  = TRUE) +
+      geom_point(aes(color = td))+
+      scale_color_gradient2(high = "orchid4",  mid = 'grey', low = "palegreen4", midpoint = mean(range(sites.td)), limits = range_td, name = 'Garden TD (°C)')  +
+      theme(legend.position = 'right')
+    
+    legend <- cowplot::get_legend(leg_plot)
+  }
+}
+
+
+plots.summ <- plots.summ[lengths(plots.summ)>0]
+# add legend to beginning of plot list
+
+plots.summ[[length(plots.summ)+1]] <- legend
+
+# there are two significant traits
+p3 <- grid.arrange(grobs = plots.summ, ncol = 3)
+plot(p3)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxTD_2024.png', p3, height = 4, width = 9)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxTD_2024.pdf', p3, height = 4, width = 9)
+
+# rename plots list for later use
+plots.trait.td.24 <- plots.summ
+
+```
+
+## Combine plots for both years
+
+```{r trait_plots_both_years}
+
+# MAT
+plots.trait.mat <- c(plots.trait.mat.23, plots.trait.mat.24)
+plots.trait.mat <- plots.trait.mat[lengths(plots.trait.mat)>0]
+
+# Because of ggrepel for garden labels, it will not plot if the window is too small
+# To fix this when plotting within Rstudio, create a new window and expand to a larger size.
+#dev.new()
+p.mat <- grid.arrange(grobs = plots.trait.mat, ncol = 4)
+plot(p.mat)
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxMAT.png', p.mat, height = 16, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxMAT.pdf', p.mat, height = 16, width = 14)
+
+# MAP
+
+plots.trait.map <- c(plots.trait.map.23, plots.trait.map.24)
+plots.trait.map <- plots.trait.map[lengths(plots.trait.map)>0]
+
+#dev.new()
+p.map <- grid.arrange(grobs = plots.trait.map, ncol = 4)
+plot(p.map)
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxMAP.png', p.map, height = 14, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxMAP.pdf', p.map, height = 14, width = 14)
+
+# TD
+
+plots.trait.td <- c(plots.trait.td.23, plots.trait.td.24)
+plots.trait.td <- plots.trait.td[lengths(plots.trait.td)>0]
+
+#dev.new()
+p.td <- grid.arrange(grobs = plots.trait.td, ncol = 4)
+plot(p.td)
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxTD.png', p.td, height = 14, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitxTD.pdf', p.td, height = 14, width = 14)
+
+
+```
+
+
+## Do trait values predict end-of-year survival?
+
+
+Mostly, no - it seems that there is not enough mortality during one season to predict how trait values affect it
+
+Most of these models did not converge,likely because there was little mortality within the year, so below code is not run
+
+
+```{r model_survival, eval = F, include = T}
+
+table(dat$Survival_09_2023, dat$MiniCG_Site)
+
+# do these traits predict survival?
+
+# reorder gardens by climate MAT
+
+tmp <- aggregate(dat$garden_MAT_2023, by = list(dat$MiniCG_Site_2023), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2023 <- factor(dat$MiniCG_Site_2023, levels = ord)
+
+sites <- c("SWMN", "WI", "ID", "WYO", "EVERGREEN", "MSU", "OSU", "MORTON", "WSU", "PENN", "VA", "SU")
+
+sites.mat <- dat$garden_MAT_2023[match(sites, dat$MiniCG_Site)]
+
+mods.mat <- list()
+for(n in 1:length(traits)){
+    
+    trait <- traits[n]
+    
+     print(paste('Model for:', trait))
+    
+    mod <- glmer(paste0('Survival_09_2023 ~', trait,  '* garden_MAT_2023 + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+                data = dat,
+                family = binomial
+    )
+    
+    print(car::Anova(mod))
+    
+    p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std')
+    plot(p1)
+    #plot_model(mod, type = 're')
+    
+    mods.mat[n] <- mod
+    names(mods.mat)[n] <- trait
+    
+    # plot data
+    p2 <- ggplot(data = dat, aes_string(y = 'Survival_09_2023', x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+    geom_point(na.rm = TRUE) +
+    scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry') +
+    ggtitle(trait) +
+    stat_smooth(color = 'black', method = "glm", method.args = list(family = "binomial")) +
+    facet_wrap(~ MiniCG_Site_2023, drop = T, scales = 'free') +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+    theme(axis.title.x = element_blank())
+
+  plot(p2)
+    
+}
+
+#plot_models(mods.pc1, vline.color = "black", show.values = T, std.est = T, m.labels = names(mods.pc1))
+
+
+# with MAP
+
+# reorder gardens by MAP
+tmp <- aggregate(dat$garden_MAP_2023, by = list(dat$MiniCG_Site_2023), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2023 <- factor(dat$MiniCG_Site_2023, levels = ord)
+
+sites <- c("SWMN", "WI", "ID", "WYO", "EVERGREEN", "MSU", "OSU", "MORTON", "WSU", "PENN", "VA", "SU")
+
+sites.map <- dat$garden_MAP_2023[match(sites, dat$MiniCG_Site)]
+
+
+mods.map <- list()
+
+for(n in 1:length(traits)){
+    
+    trait <- traits[n]
+    
+    mod <- glmer(paste0('Survival_09_2023 ~', trait,  '* garden_climate_2023_MAP + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+                data = dat,
+                family = binomial
+    )
+    
+    print(car::Anova(mod))
+    
+    p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std')
+    plot(p1)
+    #plot_model(mod, type = 're')
+    
+      mods.map[n] <- mod
+    names(mods.map)[n] <- trait
+    
+        # plot data
+    p2 <- ggplot(data = dat, aes_string(y = 'Survival_09_2023', x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+    geom_point(na.rm = TRUE) +
+    scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry') +
+    ggtitle(trait) +
+    stat_smooth(color = 'black', method = "glm", method.args = list(family = "binomial")) +
+    facet_wrap(~ MiniCG_Site_2023, drop = T, scales = 'free') +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+    theme(axis.title.x = element_blank())
+
+  plot(p2)
+    
+}
+
+#plot_models(mods.pc2, vline.color = "black", show.values = T, std.est = T, m.labels = names(mods.pc2))
+
+
+
+
+```
+
+# Statistical models for plasticity
+
+Test whether trait plasticity predicts growth in each garden, and whether the plasticity-growth relationship varies by garden climate.
+
+## Does trait plasticity (RDPI) predict growth in 2023?
+
+```{r setup_plasticity_RDPI_2023}
+
+# merge plasticity values with main df
+
+# get plasticity traits
+plast <- grep('rdpi', colnames(rdpi), value = T)
+# remove 2024 traits
+plast <- plast[grep('2024', plast, invert = T)]
+
+# add empty columns
+dat[,plast] <- NA
+
+# fill in plasticity columns for each genotype
+for(n in 1:nrow(rdpi)){
+  
+  geno <- rownames(rdpi)[n]
+  dat[dat$Genotype == geno, plast] <- rdpi[geno,plast]
+  
+}
+
+
+traits <- plast
+
+# get rid of redundant stomata traits 
+traits <- traits[! traits %in% c("plasticity_rdpi_lower_stomata_count", "plasticity_rdpi_upper_stomata_count_log", "plasticity_rdpi_upper_stomata_density_over_total_density_log", "plasticity_rdpi_stomata_density_both")]
+
+# does plasticity in these traits predict growth increment?
+
+```
+
+### Garden MAT
+
+```{r plast_MAT_2023}
+
+# reorder gardens by MAT
+tmp <- aggregate(dat$garden_MAT_2023, by = list(dat$MiniCG_Site_2023), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2023 <- factor(dat$MiniCG_Site_2023, levels = ord)
+
+sites <- levels(dat$MiniCG_Site_2023)
+# remove UCM - height not measured
+sites <- sites[! sites == 'UCM']
+
+sites.mat <- dat$garden_MAT_2023[match(sites, dat$MiniCG_Site)]
+
+
+# to save results
+mods.mat <- list()
+
+# list to save summary plot for each trait with significant effects on fitness
+plots.summ <- list()
+
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  
+  print(paste('Model for:', trait))
+  
+  mod <- lmer(paste0('GrowthIncrement_2023 ~', trait,  '* garden_MAT_2023 + Pt + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+              data = dat
+  )
+  
+  print(car::Anova(mod))
+  
+  p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std', 
+                   title = paste('2023 Growth ~ ', trait, sep = ''))
+  plot(p1)
+  #plot_model(mod, type = 're')
+  
+  mods.mat[[n]] <- mod
+  names(mods.mat)[n] <- trait
+  
+  #####################
+  # posthoc tests
+  # if either the climate or trait x climate are significant, run posthoc tests for each garden
+  mod.info <- Anova(mod)
+  # if any coefficients are significant, plot by garden
+  # need to change indexes if model is changed!
+  if(mod.info$`Pr(>Chisq)`[1] <= 0.05 | mod.info$`Pr(>Chisq)`[2] <= 0.05 | mod.info$`Pr(>Chisq)`[4] <=0.05){
+    
+# list to save plots for each site
+    plots.sub <- list()
+    
+    # dataframe to save outputs from posthoc tests
+    df.posthoc <- as.data.frame(matrix(ncol = 3, nrow = length(sites)))
+    rownames(df.posthoc) <- sites
+    colnames(df.posthoc) <- c('mat', 'slope', 'pval')
+    df.posthoc$mat <- sites.mat
+    
+    for(s in 1:length(sites)){
+      
+      site <- sites[s]
+      dat.sub <- subset(dat, MiniCG_Site_2023 == site)
+      # skip if site is missing data
+      if(sum(!is.na(dat.sub[,trait])) > 10){
+        mod.sub <- lmer(paste0('GrowthIncrement_2023 ~', trait, '+ Pt + (1 | block) + (1 | Genotype)'),
+                        data = dat.sub)
+        # get pval for trait
+        mod.sub.info <- Anova(mod.sub)
+        df.posthoc[site, 'pval'] <- mod.sub.info$`Pr(>Chisq)`[1]
+        
+        # get slopes from fixed effect of trait (effect on growth)
+        df.posthoc[site, 'slope'] <- fixef(mod.sub)[2]
+        
+        # make title pretty
+        maintitle <- paste(site, '\n', trait_names_df[trait, 'trait_names'], '\n', 'p = ', round(df.posthoc$pval[s], 3), sep = '')
+        maintitle <- paste(strwrap(maintitle, width = 26), collapse = '\n')   
+        
+        # plot
+        p <- ggplot(data = dat.sub, aes_string(y = 'GrowthIncrement_2023', x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+          geom_point(na.rm = TRUE) +
+          scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+          ggtitle(maintitle) +
+          geom_smooth(color = 'black', lty = ifelse(df.posthoc$pval[s] <= 0.05, 1,2), method = 'lm', formula = y ~ x, na.rm = TRUE) +
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+          theme(axis.title.x = element_blank())
+        
+        #plot(p)
+        plots.sub[[s]] <- p
+        
+      }
+    }
+
+    # pvals are adjusted for summary plot
+    df.posthoc$pvals.adj <- p.adjust(df.posthoc$pval, method = 'BH') 
+    
+    # plot panel with relationship for each garden
+    # remove empty plots
+    plots.sub <- plots.sub[lengths(plots.sub)>0]
+    # plot in grid
+    p1 <- grid.arrange(grobs = plots.sub, ncol = 4)
+    #plot(p1)
+    
+    # setup text showing significance
+    sig_text <- paste0('Plasticity ', pval_stars(mod.info[1, 'Pr(>Chisq)']), '\n',
+                       'Climate ', pval_stars(mod.info[2, 'Pr(>Chisq)']), '\n',
+                       'Plasticity x Climate ', pval_stars(mod.info[4, 'Pr(>Chisq)']))
+    
+    # wrap title
+    maintitle <- trait_names_df[trait, 'trait_names']
+    maintitle <- paste(strwrap(maintitle, width = 26), collapse = '\n')
+    
+    # plot slope of fitness relationship vs climate
+    p2 <- ggplot(df.posthoc, aes(x = mat, y = slope), na.rm  = TRUE) +
+      geom_smooth(method = 'lm', col = 'black', na.rm = TRUE) +
+      geom_hline(yintercept = 0, lty = 2) +
+      geom_point(size = 5, stroke = 2, shape = ifelse(df.posthoc$pvals.adj <= 0.05, 16, 1), aes(col = mat), na.rm = TRUE) +
+      scale_color_gradient2(high = "red2", mid = "grey", low = "blue2", midpoint = mean(range(sites.mat)), limits = range_mat, name = 'Garden MAT (°C)') +
+      ggtitle(maintitle,
+              subtitle = sig_text) +
+      xlab('Garden MAT') +
+      ylab('Effect on Growth Increment') +
+      geom_text_repel(label = rownames(df.posthoc), aes(x = mat, y = slope), box.padding = 0.5, min.segment.length = 1, size = 4) +
+        theme(plot.title = element_text(size = 15),
+        plot.subtitle = element_text(size = 10),
+        legend.position = 'none')
+    plot(p2)
+    
+    plots.summ[[n]] <- p2
+    names(plots.summ)[n] <- trait
+    
+    # add legend
+    leg_plot <- ggplot(df.posthoc, aes(x = mat, y = slope), na.rm  = TRUE) +
+      geom_point(aes(color = mat))+
+      scale_color_gradient2(high = "red2", mid = "grey", low = "blue2", midpoint = mean(range(sites.mat)), limits = range_mat, name = 'Garden MAT (°C)') +
+      theme(legend.position = 'right')
+    
+    legend <- cowplot::get_legend(leg_plot)
+    
+  }
+}
+
+
+plots.summ <- plots.summ[lengths(plots.summ)>0]
+
+# add legend to beginning of plot list
+
+plots2 <- plots.summ
+plots2[[length(plots.summ)+1]] <- legend
+
+p3 <- grid.arrange(grobs = plots2, ncol = 4)
+plot(p3)
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxMAT_2023.png', p3, height = 12, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxMAT_2023.pdf', p3, height = 12, width = 18)
+
+# rename plots list for later use
+plots.plast.mat.23 <- plots.summ
+
+```
+
+### Garden MAP
+
+```{r plast_MAP_2023}
+
+################################################
+# with MAP
+
+# reorder gardens by MAP
+tmp <- aggregate(dat$garden_MAP_2023, by = list(dat$MiniCG_Site_2023), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2023 <- factor(dat$MiniCG_Site_2023, levels = ord)
+
+sites <- levels(dat$MiniCG_Site_2023)
+# remove UCM - height not measured
+sites <- sites[! sites == 'UCM']
+
+sites.map <- dat$garden_MAP_2023[match(sites, dat$MiniCG_Site)]
+
+
+# to save results
+mods.map <- list()
+
+# list to save summary plot for each trait with significant effects on fitness
+plots.summ <- list()
+
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  
+  mod <- lmer(paste0('GrowthIncrement_2023 ~', trait,  '* garden_MAP_2023 + Pt + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+              data = dat
+  )
+  
+  print(car::Anova(mod))
+  
+  p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std', 
+                   title = paste('2023 Growth ~ ', trait, sep = ''))
+  plot(p1)
+  #plot_model(mod, type = 're')
+  
+  mods.map[[n]] <- mod
+  names(mods.map)[n] <- trait
+  
+  #####################
+  # posthoc tests
+  # if either the climate or trait x climate are significant, run posthoc tests for each garden
+  mod.info <- Anova(mod)
+  # if any coefficients are significant, plot by garden
+  # need to change indexes if model is changed!
+  if(mod.info$`Pr(>Chisq)`[1] <= 0.05 | mod.info$`Pr(>Chisq)`[2] <= 0.05 | mod.info$`Pr(>Chisq)`[4] <=0.05){
+    
+# list to save plots for each site
+    plots.sub <- list()
+    
+    
+    # dataframe to save outputs from posthoc tests
+    df.posthoc <- as.data.frame(matrix(ncol = 3, nrow = length(sites)))
+    rownames(df.posthoc) <- sites
+    colnames(df.posthoc) <- c('map', 'slope', 'pval')
+    df.posthoc$map <- sites.map
+    
+    for(s in 1:length(sites)){
+      
+      site <- sites[s]
+      dat.sub <- subset(dat, MiniCG_Site_2023 == site)
+      # skip if site is missing data
+      if(sum(!is.na(dat.sub[,trait])) > 10){
+        mod.sub <- lmer(paste0('GrowthIncrement_2023 ~', trait, '+ Pt + (1 | block) + (1 | Genotype)'),
+                        data = dat.sub)
+        # get pval for trait
+        mod.sub.info <- Anova(mod.sub)
+        df.posthoc[site, 'pval'] <- mod.sub.info$`Pr(>Chisq)`[1]
+        
+        # get slopes from fixed effect of trait (effect on growth)
+        df.posthoc[site, 'slope'] <- fixef(mod.sub)[2]
+        
+        # make title pretty
+        maintitle <- paste(site, '\n', trait_names_df[trait, 'trait_names'], '\n', 'p = ', round(df.posthoc$pval[s], 3), sep = '')
+        maintitle <- paste(strwrap(maintitle, width = 26), collapse = '\n') 
+        
+        # plot
+        p <- ggplot(data = dat.sub, aes_string(y = 'GrowthIncrement_2023', x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+          geom_point(na.rm = TRUE) +
+          scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+          ggtitle(maintitle) +
+          geom_smooth(color = 'black', lty = ifelse(df.posthoc$pval[s] <= 0.05, 1,2), method = 'lm', formula = y ~ x, na.rm = TRUE) +
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+          theme(axis.title.x = element_blank())
+        
+        #plot(p)
+        plots.sub[[s]] <- p
+        
+      }
+    }
+
+    # pvals are adjusted for summary plot
+    df.posthoc$pvals.adj <- p.adjust(df.posthoc$pval, method = 'BH') 
+    
+    # plot panel with relationship for each garden
+    # remove empty plots
+    plots.sub <- plots.sub[lengths(plots.sub)>0]
+    # plot in grid
+    p1 <- grid.arrange(grobs = plots.sub, ncol = 4)
+    #plot(p1)
+    
+    # setup text showing significance
+    sig_text <- paste0('Plasticity ', pval_stars(mod.info[1, 'Pr(>Chisq)']), '\n',
+                       'Climate ', pval_stars(mod.info[2, 'Pr(>Chisq)']), '\n',
+                       'Plasticity x Climate ', pval_stars(mod.info[4, 'Pr(>Chisq)']))
+    
+    # wrap title
+    maintitle <- trait_names_df[trait, 'trait_names']
+    maintitle <- paste(strwrap(maintitle, width = 26), collapse = '\n')
+    
+    # plot slope of fitness relationship vs climate
+    p2 <- ggplot(df.posthoc, aes(x = map, y = slope), na.rm  = TRUE) +
+      geom_smooth(method = 'lm', col = 'black', na.rm = TRUE) +
+      geom_hline(yintercept = 0, lty = 2) +
+      geom_point(size = 5, stroke = 2, shape = ifelse(df.posthoc$pvals.adj <= 0.05, 16, 1), aes(col = map), na.rm = TRUE) +
+      scale_color_gradient2(high = "steelblue2",  mid = 'grey', low = "sienna3", midpoint = mean(range(sites.map)), limits = range_map, name = 'Garden MAP (mm)') +
+      ggtitle(maintitle,
+              subtitle = sig_text) +
+      xlab('Garden MAP') +
+      ylab('Effect on Growth Increment') +
+      geom_text_repel(label = rownames(df.posthoc), aes(x = map, y = slope), box.padding = 0.5, min.segment.length = 1, size = 4) +
+        theme(plot.title = element_text(size = 15),
+        plot.subtitle = element_text(size = 10),
+        legend.position = 'none')
+    plot(p2)
+    
+    plots.summ[[n]] <- p2
+    names(plots.summ)[n] <- trait
+    
+     # add legend
+    leg_plot <- ggplot(df.posthoc, aes(x = map, y = slope), na.rm  = TRUE) +
+      geom_point(aes(color = map))+
+      scale_color_gradient2(high = "steelblue2",  mid = 'grey', low = "sienna3", midpoint = mean(range(sites.map)), limits = range_map, name = 'Garden MAP (mm)') +
+      theme(legend.position = 'right')
+    
+    legend <- cowplot::get_legend(leg_plot)
+    
+  }
+}
+
+
+
+plots.summ <- plots.summ[lengths(plots.summ)>0]
+
+# add legend to beginning of plot list
+
+plots2 <- plots.summ
+plots2[[length(plots.summ)+1]] <- legend
+
+p3 <- grid.arrange(grobs = plots2, ncol = 4)
+plot(p3)
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxMAP_2023.png', p3, height = 6, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxMAP_2023.pdf', p3, height = 6, width = 14)
+
+# rename plots list for later use
+plots.plast.map.23 <- plots.summ
+
+```
+
+### Garden TD
+
+```{r plast_TD_2023}
+
+################################################
+# with TD
+
+# reorder gardens by TD
+tmp <- aggregate(dat$garden_TD_2023, by = list(dat$MiniCG_Site_2023), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2023 <- factor(dat$MiniCG_Site_2023, levels = ord)
+
+sites <- levels(dat$MiniCG_Site_2023)
+# remove UCM - height not measured
+sites <- sites[! sites == 'UCM']
+
+sites.td <- dat$garden_TD_2023[match(sites, dat$MiniCG_Site)]
+
+
+# to save results
+mods.td <- list()
+
+# list to save summary plot for each trait with significant effects on fitness
+plots.summ <- list()
+
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  
+  mod <- lmer(paste0('GrowthIncrement_2023 ~', trait,  '* garden_TD_2023 + Pt + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+              data = dat
+  )
+  
+  print(car::Anova(mod))
+  
+  p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std', 
+                   title = paste('2023 Growth ~ ', trait, sep = ''))
+  plot(p1)
+  #plot_model(mod, type = 're')
+  
+  mods.td[[n]] <- mod
+  names(mods.td)[n] <- trait
+  
+  #####################
+  # posthoc tests
+  # if either the climate or trait x climate are significant, run posthoc tests for each garden
+  mod.info <- Anova(mod)
+  # if any coefficients are significant, plot by garden
+  # need to change indexes if model is changed!
+  if(mod.info$`Pr(>Chisq)`[1] <= 0.05 | mod.info$`Pr(>Chisq)`[2] <= 0.05 | mod.info$`Pr(>Chisq)`[4] <=0.05){
+    
+# list to save plots for each site
+    plots.sub <- list()
+    
+    
+    # dataframe to save outputs from posthoc tests
+    df.posthoc <- as.data.frame(matrix(ncol = 3, nrow = length(sites)))
+    rownames(df.posthoc) <- sites
+    colnames(df.posthoc) <- c('td', 'slope', 'pval')
+    df.posthoc$td <- sites.td
+    
+    for(s in 1:length(sites)){
+      
+      site <- sites[s]
+      dat.sub <- subset(dat, MiniCG_Site_2023 == site)
+      # skip if site is missing data
+      if(sum(!is.na(dat.sub[,trait])) > 10){
+        mod.sub <- lmer(paste0('GrowthIncrement_2023 ~', trait, '+ Pt + (1 | block) + (1 | Genotype)'),
+                        data = dat.sub)
+        # get pval for trait
+        mod.sub.info <- Anova(mod.sub)
+        df.posthoc[site, 'pval'] <- mod.sub.info$`Pr(>Chisq)`[1]
+        
+        # get slopes from fixed effect of trait (effect on growth)
+        df.posthoc[site, 'slope'] <- fixef(mod.sub)[2]
+        
+        # make title pretty
+        maintitle <- paste(site, '\n', trait_names_df[trait, 'trait_names'], '\n', 'p = ', round(df.posthoc$pval[s], 3), sep = '')
+        maintitle <- paste(strwrap(maintitle, width = 26), collapse = '\n') 
+        
+        # plot
+        p <- ggplot(data = dat.sub, aes_string(y = 'GrowthIncrement_2023', x = trait, color = 'k2_tricho', na.rm  = TRUE)) +
+          geom_point(na.rm = TRUE) +
+          scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+          ggtitle(maintitle) +
+          geom_smooth(color = 'black', lty = ifelse(df.posthoc$pval[s] <= 0.05, 1,2), method = 'lm', formula = y ~x, na.rm = TRUE) +
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+          theme(axis.title.x = element_blank())
+        
+        #plot(p)
+        plots.sub[[s]] <- p
+        
+      }
+    }
+
+    # pvals are adjusted for summary plot
+    df.posthoc$pvals.adj <- p.adjust(df.posthoc$pval, method = 'BH') 
+    
+    # plot panel with relationship for each garden
+    # remove empty plots
+    plots.sub <- plots.sub[lengths(plots.sub)>0]
+    # plot in grid
+    p1 <- grid.arrange(grobs = plots.sub, ncol = 4)
+    #plot(p1)
+    
+    # setup text showing significance
+    sig_text <- paste0('Plasticity ', pval_stars(mod.info[1, 'Pr(>Chisq)']), '\n',
+                       'Climate ', pval_stars(mod.info[2, 'Pr(>Chisq)']), '\n',
+                       'Plasticity x Climate ', pval_stars(mod.info[4, 'Pr(>Chisq)']))
+    
+    # wrap title
+    maintitle <- trait_names_df[trait, 'trait_names']
+    maintitle <- paste(strwrap(maintitle, width = 26), collapse = '\n')
+    
+    # plot slope of fitness relationship vs climate
+    p2 <- ggplot(df.posthoc, aes(x = td, y = slope), na.rm  = TRUE) +
+      geom_smooth(method = 'lm', col = 'black', na.rm = TRUE) +
+      geom_hline(yintercept = 0, lty = 2) +
+      geom_point(size = 5, stroke = 2, shape = ifelse(df.posthoc$pvals.adj <= 0.05, 16, 1), aes(col = td), na.rm = TRUE) +
+      scale_color_gradient2("orchid4",  mid = 'grey', low = "palegreen4", midpoint = mean(range(sites.td)), limits= range_td, name = 'Garden TD (°C)') +
+      ggtitle(maintitle,
+              subtitle = sig_text) +
+      xlab('Garden TD') +
+      ylab('Effect on Growth Increment') +
+      geom_text_repel(label = rownames(df.posthoc), aes(x = td, y = slope), box.padding = 0.5, min.segment.length = 1, size = 4) +
+        theme(plot.title = element_text(size = 15),
+        plot.subtitle = element_text(size = 10),
+        legend.position = 'none')
+    plot(p2)
+    
+    plots.summ[[n]] <- p2
+    names(plots.summ)[n] <- trait
+    
+    # add legend
+    leg_plot <- ggplot(df.posthoc, aes(x = td, y = slope), na.rm  = TRUE) +
+      geom_point(aes(color = td))+
+      scale_color_gradient2("orchid4",  mid = 'grey', low = "palegreen4", midpoint = mean(range(sites.td)), limits= range_td, name = 'Garden TD (°C)') +
+      theme(legend.position = 'right')
+    
+    legend <- cowplot::get_legend(leg_plot)
+    
+  }
+}
+
+
+plots.summ <- plots.summ[lengths(plots.summ)>0]
+
+# add legend to beginning of plot list
+
+plots2 <- plots.summ
+plots2[[length(plots.summ)+1]] <- legend
+
+p3 <- grid.arrange(grobs = plots2, ncol = 3)
+plot(p3)
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxTD_2023.png', p3, height = 6, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxTD_2023.pdf', p3, height = 6, width = 14)
+
+# rename plots list for later use
+plots.plast.td.23 <- plots.summ
+
+
+```
+
+## Does trait plasticity (RDPI) predict growth in 2024?
+
+```{r setup_plasticity_RDPI_2024}
+
+# merge plasticity values with main df
+
+# get plasticity traits
+plast <- grep('rdpi', colnames(rdpi), value = T)
+plast <- grep('2024', plast, value = T)
+
+# add empty columns
+dat[,plast] <- NA
+
+# fill in plasticity columns for each genotype
+for(n in 1:nrow(rdpi)){
+  
+  geno <- rownames(rdpi)[n]
+  dat[dat$Genotype == geno, plast] <- rdpi[geno,plast]
+  
+}
+
+traits <- plast
+
+# does plasticity in these traits predict growth increment?
+
+```
+
+
+### Garden MAT
+
+```{r plast_MAT_2024}
+
+# reorder gardens by MAT
+tmp <- aggregate(dat$garden_MAT_2024, by = list(dat$MiniCG_Site_2024), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2024 <- factor(dat$MiniCG_Site_2024, levels = ord)
+
+# sites <- levels(dat$MiniCG_Site_2024)
+sites <- c("WI", "ID", "WYO", "EVERGREEN", "MSU", "OSU", "MORTON", "WSU", "PENN", "VA", "SU")
+
+sites.mat <- dat$garden_MAT_2024[match(sites, dat$MiniCG_Site)]
+
+#sites <- levels(dat$MiniCG_Site_2024)
+# remove UCM - height not measured
+#sites <- sites[! sites == 'UCM']
+
+# to save results
+mods.mat <- list()
+
+# list to save summary plot for each trait with significant effects on fitness
+plots.summ <- list()
+
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  
+  mod <- lmer(paste0('GrowthIncrement_2024 ~', trait,  '* garden_MAT_2024 + Pt + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+              data = dat
+  )
+  
+  print(car::Anova(mod))
+  
+  p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std', 
+                   title = paste('2024 Growth ~ ', trait, sep = ''))
+  plot(p1)
+  #plot_model(mod, type = 're')
+  
+  mods.mat[[n]] <- mod
+  names(mods.mat)[n] <- trait
+  
+  #####################
+  # posthoc tests
+  # if either the climate or trait x climate are significant, run posthoc tests for each garden
+  mod.info <- Anova(mod)
+  # if any coefficients are significant, plot by garden
+  # need to change indexes if model is changed!
+  if(mod.info$`Pr(>Chisq)`[1] <= 0.05 | mod.info$`Pr(>Chisq)`[2] <= 0.05 | mod.info$`Pr(>Chisq)`[4] <=0.05){
+    
+# list to save plots for each site
+    plots.sub <- list()
+    
+    # dataframe to save outputs from posthoc tests
+    df.posthoc <- as.data.frame(matrix(ncol = 3, nrow = length(sites)))
+    rownames(df.posthoc) <- sites
+    colnames(df.posthoc) <- c('mat', 'slope', 'pval')
+    df.posthoc$mat <- sites.mat
+    
+    for(s in 1:length(sites)){
+      
+      site <- sites[s]
+      dat.sub <- subset(dat, MiniCG_Site_2024 == site)
+      # skip if site is missing data
+      if(sum(!is.na(dat.sub[,trait])) > 10){
+        
+        mod.sub <- lmer(paste0('GrowthIncrement_2024 ~', trait, '+ Pt + (1 | block) + (1 | Genotype)'),
+                        data = dat.sub)
+        # get pval for trait
+        mod.sub.info <- Anova(mod.sub)
+        df.posthoc[site, 'pval'] <- mod.sub.info$`Pr(>Chisq)`[1]
+        
+        # get slopes from fixed effect of trait (effect on growth)
+        df.posthoc[site, 'slope'] <- fixef(mod.sub)[2]
+        
+        # make title pretty
+        maintitle <- paste(site, '\n', trait_names_df[trait, 'trait_names'], '\n', 'p = ', round(df.posthoc$pval[s], 3), sep = '')
+        maintitle <- paste(strwrap(maintitle, width = 26), collapse = '\n') 
+        
+        # plot
+        p <- ggplot(data = dat.sub, aes_string(y = 'GrowthIncrement_2024', x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+          geom_point(na.rm = TRUE) +
+          scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+          ggtitle(maintitle) +
+          geom_smooth(color = 'black', lty = ifelse(df.posthoc$pval[s] <= 0.05, 1,2), method = 'lm', formula = y ~ x, na.rm = TRUE) +
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+          theme(axis.title.x = element_blank())
+        
+        #plot(p)
+        plots.sub[[s]] <- p
+        
+      }
+    }
+
+    # pvals are adjusted for summary plot
+    df.posthoc$pvals.adj <- p.adjust(df.posthoc$pval, method = 'BH') 
+    
+    # plot panel with relationship for each garden
+    # remove empty plots
+    plots.sub <- plots.sub[lengths(plots.sub)>0]
+    # plot in grid
+    p1 <- grid.arrange(grobs = plots.sub, ncol = 4)
+    #plot(p1)
+    
+    # setup text showing significance
+    sig_text <- paste0('Plasticity ', pval_stars(mod.info[1, 'Pr(>Chisq)']), '\n',
+                       'Climate ', pval_stars(mod.info[2, 'Pr(>Chisq)']), '\n',
+                       'Plasticity x Climate ', pval_stars(mod.info[4, 'Pr(>Chisq)']))
+    
+    # wrap title
+    maintitle <- trait_names_df[trait, 'trait_names']
+    maintitle <- paste(strwrap(maintitle, width = 26), collapse = '\n')
+    
+    # plot slope of fitness relationship vs climate
+    p2 <- ggplot(df.posthoc, aes(x = mat, y = slope), na.rm  = TRUE) +
+      geom_smooth(method = 'lm', col = 'black', na.rm = TRUE) +
+      geom_hline(yintercept = 0, lty = 2) +
+      geom_point(size = 5, stroke = 2, shape = ifelse(df.posthoc$pvals.adj <= 0.05, 16, 1), aes(col = mat), na.rm = TRUE) +
+      scale_color_gradient2(high = "red2", mid = "grey", low = "blue2", midpoint = mean(range(sites.mat)), limits = range_mat, name = 'Garden MAT (°C)') +
+      ggtitle(maintitle,
+              subtitle = sig_text) +
+      xlab('Garden MAT') +
+      ylab('Effect on Growth Increment') +
+      geom_text_repel(label = rownames(df.posthoc), aes(x = mat, y = slope), box.padding = 0.5, min.segment.length = 1, size = 4) +
+      theme(plot.title = element_text(size = 15),
+            plot.subtitle = element_text(size = 10),
+            legend.position = 'none')
+    plot(p2)
+    
+    plots.summ[[n]] <- p2
+    names(plots.summ)[n] <- trait
+    
+     # add legend
+    leg_plot <- ggplot(df.posthoc, aes(x = mat, y = slope), na.rm  = TRUE) +
+      geom_point(aes(color = mat))+
+      scale_color_gradient2(high = "red2", mid = "grey", low = "blue2", midpoint = mean(range(sites.mat)), limits = range_mat, name = 'Garden MAT (°C)') +
+      theme(legend.position = 'right')
+    
+    legend <- cowplot::get_legend(leg_plot)
+    
+  }
+}
+
+
+plots.summ <- plots.summ[lengths(plots.summ)>0]
+
+# add legend to beginning of plot list
+plots.summ[[length(plots.summ)+1]] <- legend
+
+p3 <- grid.arrange(grobs = plots.summ, ncol = 4)
+plot(p3)
+
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxMAT_2024.png', p3, height = 8, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxMAT_2024.pdf', p3, height = 8, width = 14)
+
+# rename plots list for later use
+plots.plast.mat.24 <- plots.summ
+
+```
+
+### Garden MAP
+
+```{r plast_MAP_2024}
+
+################################################
+# with MAP
+
+# reorder gardens by MAP
+tmp <- aggregate(dat$garden_MAP_2024, by = list(dat$MiniCG_Site_2024), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2024 <- factor(dat$MiniCG_Site_2024, levels = ord)
+
+sites <- c("WI", "ID", "WYO", "EVERGREEN", "MSU", "OSU", "MORTON", "WSU", "PENN", "VA", "SU")
+
+#sites <- levels(dat$MiniCG_Site_2024)
+# remove UCM - height not measured
+#sites <- sites[! sites == 'UCM']
+
+sites.map <- dat$garden_MAP_2024[match(sites, dat$MiniCG_Site)]
+
+
+# to save results
+mods.map <- list()
+
+# list to save summary plot for each trait with significant effects on fitness
+plots.summ <- list()
+
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  
+  mod <- lmer(paste0('GrowthIncrement_2024 ~', trait,  '* garden_MAP_2024 + Pt + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+              data = dat
+  )
+  
+  print(car::Anova(mod))
+  
+  p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std', 
+                   title = paste('2024 Growth ~ ', trait, sep = ''))
+  plot(p1)
+  #plot_model(mod, type = 're')
+  
+  mods.map[[n]] <- mod
+  names(mods.map)[n] <- trait
+  
+  #####################
+  # posthoc tests
+  # if either the climate or trait x climate are significant, run posthoc tests for each garden
+  mod.info <- Anova(mod)
+  # if any coefficients are significant, plot by garden
+  # need to change indexes if model is changed!
+  if(mod.info$`Pr(>Chisq)`[1] <= 0.05 | mod.info$`Pr(>Chisq)`[2] <= 0.05 | mod.info$`Pr(>Chisq)`[4] <=0.05){
+    
+# list to save plots for each site
+    plots.sub <- list()
+    
+    # dataframe to save outputs from posthoc tests
+    df.posthoc <- as.data.frame(matrix(ncol = 3, nrow = length(sites)))
+    rownames(df.posthoc) <- sites
+    colnames(df.posthoc) <- c('map', 'slope', 'pval')
+    df.posthoc$map <- sites.map
+    
+    for(s in 1:length(sites)){
+      
+      site <- sites[s]
+      dat.sub <- subset(dat, MiniCG_Site_2024 == site)
+      # skip if site is missing data
+      if(sum(!is.na(dat.sub[,trait])) > 10){
+        mod.sub <- lmer(paste0('GrowthIncrement_2024 ~', trait, '+ Pt + (1 | block) + (1 | Genotype)'),
+                        data = dat.sub)
+        # get pval for trait
+        mod.sub.info <- Anova(mod.sub)
+        df.posthoc[site, 'pval'] <- mod.sub.info$`Pr(>Chisq)`[1]
+        
+        # get slopes from fixed effect of trait (effect on growth)
+        df.posthoc[site, 'slope'] <- fixef(mod.sub)[2]
+        
+        # make title pretty
+        maintitle <- paste(site, '\n', trait_names_df[trait, 'trait_names'], '\n', 'p = ', round(df.posthoc$pval[s], 3), sep = '')
+        maintitle <- paste(strwrap(maintitle, width = 26), collapse = '\n')  
+        
+        # plot
+        p <- ggplot(data = dat.sub, aes_string(y = 'GrowthIncrement_2024', x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+          geom_point(na.rm = TRUE) +
+          scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+          ggtitle(maintitle) +
+          geom_smooth(color = 'black', lty = ifelse(df.posthoc$pval[s] <= 0.05, 1,2), method = 'lm', formula = y ~ x, na.rm = TRUE) +
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+          theme(axis.title.x = element_blank())
+        
+        #plot(p)
+        plots.sub[[s]] <- p
+        
+      }
+    }
+
+    # pvals are adjusted for summary plot
+    df.posthoc$pvals.adj <- p.adjust(df.posthoc$pval, method = 'BH') 
+    
+    # plot panel with relationship for each garden
+    # remove empty plots
+    plots.sub <- plots.sub[lengths(plots.sub)>0]
+    # plot in grid
+    p1 <- grid.arrange(grobs = plots.sub, ncol = 4)
+    #plot(p1)
+    
+    # setup text showing significance
+    sig_text <- paste0('Plasticity ', pval_stars(mod.info[1, 'Pr(>Chisq)']), '\n',
+                       'Climate ', pval_stars(mod.info[2, 'Pr(>Chisq)']), '\n',
+                       'Plasticity x Climate ', pval_stars(mod.info[4, 'Pr(>Chisq)']))
+    
+    # wrap title
+    maintitle <- trait_names_df[trait, 'trait_names']
+    maintitle <- paste(strwrap(maintitle, width = 26), collapse = '\n')
+    
+    # plot slope of fitness relationship vs climate
+    p2 <- ggplot(df.posthoc, aes(x = map, y = slope), na.rm  = TRUE) +
+      geom_smooth(method = 'lm', col = 'black', na.rm = TRUE) +
+      geom_hline(yintercept = 0, lty = 2) +
+      geom_point(size = 5, stroke = 2, shape = ifelse(df.posthoc$pvals.adj <= 0.05, 16, 1), aes(col = map), na.rm = TRUE) +
+      scale_color_gradient2(high = "steelblue2",  mid = 'grey', low = "sienna3", midpoint = mean(range(sites.map)), limits = range_map, name = 'Garden MAP (mm)') +
+      ggtitle(maintitle,
+              subtitle = sig_text) +
+      xlab('Garden MAP') +
+      ylab('Effect on Growth Increment') +
+      geom_text_repel(label = rownames(df.posthoc), aes(x = map, y = slope), box.padding = 0.5, min.segment.length = 1, size = 4) +
+        theme(plot.title = element_text(size = 15),
+        plot.subtitle = element_text(size = 10),
+        legend.position = 'none')
+    plot(p2)
+    
+    plots.summ[[n]] <- p2
+    names(plots.summ)[n] <- trait
+    
+     # add legend
+    leg_plot <- ggplot(df.posthoc, aes(x = map, y = slope), na.rm  = TRUE) +
+      geom_point(aes(color = map))+
+      scale_color_gradient2(high = "steelblue2",  mid = 'grey', low = "sienna3", midpoint = mean(range(sites.map)), limits = range_map, name = 'Garden MAP (mm)') +
+      theme(legend.position = 'right')
+    
+    legend <- cowplot::get_legend(leg_plot)
+  }
+}
+
+plots.summ <- plots.summ[lengths(plots.summ)>0]
+
+# add legend to beginning of plot list
+
+plots.summ[[length(plots.summ)+1]] <- legend
+
+p3 <- grid.arrange(grobs = plots.summ, ncol = 3)
+plot(p3)
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxMAP_2024.png', p3, height = 6, width = 10)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxMAP_2024.pdf', p3, height = 6, width = 10)
+
+# rename plots list for later use
+plots.plast.map.24 <- plots.summ
+
+```
+
+
+### Garden TD
+
+```{r plast_TD_2024}
+################################################
+# with TD
+
+# reorder gardens by TD
+tmp <- aggregate(dat$garden_TD_2024, by = list(dat$MiniCG_Site_2024), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2024 <- factor(dat$MiniCG_Site_2024, levels = ord)
+
+sites <- c("WI", "ID", "WYO", "EVERGREEN", "MSU", "OSU", "MORTON", "WSU", "PENN", "VA", "SU")
+
+#sites <- levels(dat$MiniCG_Site_2024)
+# remove UCM - height not measured
+#sites <- sites[! sites == 'UCM']
+
+sites.td <- dat$garden_TD_2024[match(sites, dat$MiniCG_Site)]
+
+# to save results
+mods.td <- list()
+
+# list to save summary plot for each trait with significant effects on fitness
+plots.summ <- list()
+
+
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  
+  mod <- lmer(paste0('GrowthIncrement_2024 ~', trait,  '* garden_TD_2024 + Pt + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+              data = dat
+  )
+  
+  print(car::Anova(mod))
+  
+  p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std', 
+                   title = paste('2024 Growth ~ ', trait, sep = ''))
+  plot(p1)
+  #plot_model(mod, type = 're')
+  
+  mods.td[[n]] <- mod
+  names(mods.td)[n] <- trait
+  
+  #####################
+  # posthoc tests
+  
+  # if either the climate or trait x climate are significant, run posthoc tests for each garden
+  mod.info <- Anova(mod)
+  # if any coefficients are significant, plot by garden
+  # need to change indexes if model is changed!
+  if(mod.info$`Pr(>Chisq)`[1] <= 0.05 | mod.info$`Pr(>Chisq)`[2] <= 0.05 | mod.info$`Pr(>Chisq)`[4] <=0.05){
+    
+    
+# list to save plots for each site
+    plots.sub <- list()
+    
+    # dataframe to save outputs from posthoc tests
+    df.posthoc <- as.data.frame(matrix(ncol = 3, nrow = length(sites)))
+    rownames(df.posthoc) <- sites
+    colnames(df.posthoc) <- c('td', 'slope', 'pval')
+    df.posthoc$td <- sites.td
+    
+    for(s in 1:length(sites)){
+      
+      site <- sites[s]
+      dat.sub <- subset(dat, MiniCG_Site_2024 == site)
+      # skip if site is missing data
+      if(sum(!is.na(dat.sub[,trait])) > 10){
+        mod.sub <- lmer(paste0('GrowthIncrement_2024 ~', trait, '+ Pt + (1 | block) + (1 | Genotype)'),
+                        data = dat.sub)
+        # get pval for trait
+        mod.sub.info <- Anova(mod.sub)
+        df.posthoc[site, 'pval'] <- mod.sub.info$`Pr(>Chisq)`[1]
+        
+        # get slopes from fixed effect of trait (effect on growth)
+        df.posthoc[site, 'slope'] <- fixef(mod.sub)[2]
+        
+        # make title pretty
+        maintitle <- paste(site, '\n', trait_names_df[trait, 'trait_names'], '\n', 'p = ', round(df.posthoc$pval[s], 3), sep = '')
+        maintitle <- paste(strwrap(maintitle, width = 26), collapse = '\n')  
+        
+        # plot
+        p <- ggplot(data = dat.sub, aes_string(y = 'GrowthIncrement_2024', x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+          geom_point(na.rm = TRUE) +
+          scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+          ggtitle(maintitle) +
+          geom_smooth(color = 'black', lty = ifelse(df.posthoc$pval[s] <= 0.05, 1,2), method = 'lm', formula = y ~ x, na.rm = TRUE) +
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+          theme(axis.title.x = element_blank())
+        
+        #plot(p)
+        plots.sub[[s]] <- p
+        
+      }
+    }
+
+    # pvals are adjusted for summary plot
+    df.posthoc$pvals.adj <- p.adjust(df.posthoc$pval, method = 'BH') 
+    
+    # plot panel with relationship for each garden
+    # remove empty plots
+    plots.sub <- plots.sub[lengths(plots.sub)>0]
+    # plot in grid
+    p1 <- grid.arrange(grobs = plots.sub, ncol = 4)
+    #plot(p1)
+    
+    # setup text showing significance
+    sig_text <- paste0('Plasticity ', pval_stars(mod.info[1, 'Pr(>Chisq)']), '\n',
+                       'Climate ', pval_stars(mod.info[2, 'Pr(>Chisq)']), '\n',
+                       'Plasticity x Climate ', pval_stars(mod.info[4, 'Pr(>Chisq)']))
+    
+    # wrap title
+    maintitle <- trait_names_df[trait, 'trait_names']
+    maintitle <- paste(strwrap(maintitle, width = 26), collapse = '\n')
+    
+    
+    # plot slope of fitness relationship vs climate
+    p2 <- ggplot(df.posthoc, aes(x = td, y = slope), na.rm  = TRUE) +
+            geom_smooth(method = 'lm', col = 'black', na.rm = TRUE) +
+      geom_hline(yintercept = 0, lty = 2) +
+      geom_point(size = 5, stroke = 2, shape = ifelse(df.posthoc$pvals.adj <= 0.05, 16, 1), aes(col = td), na.rm = TRUE) +
+      scale_color_gradient2("orchid4",  mid = 'grey', low = "palegreen4", midpoint = mean(range(sites.td)), limits = range_td, name = 'Garden TD (°C)') +
+      ggtitle(maintitle,
+              subtitle = sig_text) +
+      xlab('Garden TD') +
+      ylab('Effect on Growth Increment') +
+      geom_text_repel(label = rownames(df.posthoc), aes(x = td, y = slope), box.padding = 0.5, min.segment.length = 1, size = 4) +
+        theme(plot.title = element_text(size = 15),
+        plot.subtitle = element_text(size = 10),
+        legend.position = 'none'
+)
+    
+    plot(p2)
+    
+    plots.summ[[n]] <- p2
+    names(plots.summ)[n] <- trait
+
+    
+     # add legend
+    leg_plot <- ggplot(df.posthoc, aes(x = td, y = slope), na.rm  = TRUE) +
+      geom_point(aes(color = td))+
+      scale_color_gradient2("orchid4",  mid = 'grey', low = "palegreen4", midpoint = mean(range(sites.td)), limits = range_td, name = 'Garden TD (°C)') +
+      theme(legend.position = 'right')
+    
+    legend <- cowplot::get_legend(leg_plot)
+  }
+}
+
+plots.summ <- plots.summ[lengths(plots.summ)>0]
+
+# add legend to beginning of plot list
+plots.summ[[length(plots.summ)+1]] <- legend
+
+p3 <- grid.arrange(grobs = plots.summ, ncol = 3)
+plot(p3)
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxTD_2024.png', p3, height = 6, width = 10)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxTD_2024.pdf', p3, height = 6, width = 10)
+
+# rename plots list for later use
+plots.plast.td.24 <- plots.summ
+
+```
+
+
+## Plasticity plots for both years
+
+```{r plasticity_plots_combine_years}
+
+# merge lists of plots created above
+
+plots.plast.mat <- c(plots.plast.mat.23, plots.plast.mat.24)
+plots.plast.map <- c(plots.plast.map.23, plots.plast.map.24)
+plots.plast.td <- c(plots.plast.td.23, plots.plast.td.24)
+
+
+# MAT
+pMAT <- grid.arrange(grobs = plots.plast.mat, ncol = 4)
+plot(pMAT)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxMAT.png', pMAT, height = 16, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxMAT.pdf', pMAT, height = 16, width = 14)
+
+# MAP
+pMAP <- grid.arrange(grobs = plots.plast.map, ncol = 3)
+plot(pMAP)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxMAP.png', pMAP, height = 12, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxMAP.pdf', pMAP, height = 12, width = 14)
+
+# TD
+pTD <- grid.arrange(grobs = plots.plast.td, ncol = 3)
+plot(pTD) 
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxTD.png', pTD, height = 12, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityxTD.pdf', pTD, height = 12, width = 14)
+
+
+```
+
+
+```{r plot_panel}
+
+# look at overlap in significant traits
+g1 <- names(plots.trait.mat)
+g2 <- names(plots.plast.mat)
+g2 <- gsub('plasticity_rdpi_', '', g2 )
+g2 <- gsub('_log', '', g2 )
+
+overlap <- g1[g1 %in% g2]
+
+overlap <- c("DOY_Stage6_2023", "licor_PhiPS2", "licor_Fs", 
+"LMA_g_m2_2023", "DOY_last_budset_2024")
+
+# subset of traits with significant interactions
+
+panel <- grid.arrange(grobs = list(plots.trait.mat$leaf_thickness_avg_mm_2023,
+                                   plots.trait.mat$DOY_Stage6_2023,
+                                   plots.trait.mat$licor_PhiPS2, plots.trait.mat.24[[length(plots.trait.mat.24)]],
+                                   plots.plast.mat$plasticity_rdpi_leaf_thickness_avg_mm_2023,
+                                   plots.plast.mat.23$plasticity_rdpi_DOY_Stage6_2023 ,                                   plots.plast.mat$plasticity_rdpi_licor_PhiPS2), ncol = 4)
+
+plot(panel)
+
+#ggsave(file = 'results/fitness/fitnessEffectsPanel_MAT_TraitAndPlasticity.png', panel, height = 8, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffectsPanel_MAT_TraitAndPlasticity.pdf', panel, height = 8, width = 12)
+
+
+grid.arrange(grobs = list(plots.trait.mat$LMA_g_m2_2023, plots.plast.mat$plasticity_rdpi_LMA_g_m2_2023), ncol= 2)
+
+grid.arrange(grobs = list(plots.trait.mat$DOY_Stage6_2023, plots.plast.mat$plasticity_rdpi_DOY_Stage6_2023), ncol= 2)
+
+##########################
+# MAP
+# look at overlap
+g1 <- names(plots.trait.map)
+g2 <- names(plots.plast.map)
+g2 <- gsub('plasticity_rdpi_', '', g2 )
+g2 <- gsub('_log', '', g2 )
+
+overlap <- g1[g1 %in% g2]
+
+dput(overlap)
+
+#p <- grid.arrange(grobs = plots.trait.map[overlap], ncol = 4)
+
+panel <- grid.arrange(grobs = list(plots.trait.map$licor_gbw, plots.trait.map$leaf_area_cm2_2023, plots.trait.map$lower_stomata_density_mm2,             plots.plast.map$plasticity_rdpi_licor_gbw, plots.plast.map$plasticity_rdpi_leaf_area_cm2_2023_log, plots.plast.map$plasticity_rdpi_lower_stomata_density_mm2),
+                      ncol = 3)
+plot(panel)
+#ggsave(file = 'results/fitness/fitnessEffectsPanel_MAP_TraitAndPlasticity.png', panel, height = 8, width = 12)
+
+#ggsave(file = 'results/fitness/fitnessEffectsPanel_MAP_TraitAndPlasticity.pdf', panel, height = 8, width = 12)
+
+```
+
+
+
+# Is there a tradeoff between plasticity and traits?
+
+If traits and their plasticity have a significant relationship, there could be a tradeoff between plasticity and expression of certain trait values
+
+```{r tradeoff_plasticity_traits}
+
+# list of traits
+
+traits <- c("DOY_Stage2_2023", "DOY_Stage3_2023", "DOY_Stage6_2023", "DOY_Stage7_2023",  "DOY_last_budset_2023", "growing_season_days_2023", "licor_gsw", "licor_gbw", "licor_ETR", "licor_PhiPS2", "licor_Fs", "licor_Fm.", "leaf_thickness_avg_mm_2023", "LMA_g_m2_2023", "leaf_mass_g_2023", "leaf_area_cm2_2023", "lower_stomata_pore_length_mean_um", "upper_stomata_presence", "upper_stomata_pore_length_mean_um",  "upper_stomata_density_mm2", "lower_stomata_density_mm2", "stomata_ratio", "DOY_Stage2_2024", "DOY_Stage3_2024", "DOY_Stage6_2024", "DOY_Stage7_2024", "DOY_last_budset_2024", "growing_season_days_2024")
+
+plasts <- paste('plasticity_rdpi_', traits, sep = '')
+dput(plasts)
+
+sum(! plasts %in% colnames(dat))
+plasts[! plasts %in% colnames(dat)]
+
+# manually edit names of plasticity columns that were log-transformed
+dput(plasts)
+
+plasts <- c("plasticity_rdpi_DOY_Stage2_2023", "plasticity_rdpi_DOY_Stage3_2023", 
+"plasticity_rdpi_DOY_Stage6_2023", "plasticity_rdpi_DOY_Stage7_2023", 
+ "plasticity_rdpi_DOY_last_budset_2023", 
+"plasticity_rdpi_growing_season_days_2023", "plasticity_rdpi_licor_gsw", 
+"plasticity_rdpi_licor_gbw", "plasticity_rdpi_licor_ETR", "plasticity_rdpi_licor_PhiPS2", 
+"plasticity_rdpi_licor_Fs", "plasticity_rdpi_licor_Fm.", "plasticity_rdpi_leaf_thickness_avg_mm_2023", 
+"plasticity_rdpi_LMA_g_m2_2023", "plasticity_rdpi_leaf_mass_g_2023_log", 
+"plasticity_rdpi_leaf_area_cm2_2023_log", "plasticity_rdpi_lower_stomata_pore_length_mean_um", 
+"plasticity_rdpi_upper_stomata_presence", "plasticity_rdpi_upper_stomata_pore_length_mean_um", 
+"plasticity_rdpi_upper_stomata_density_mm2_log", "plasticity_rdpi_lower_stomata_density_mm2", 
+"plasticity_rdpi_stomata_ratio_log", "plasticity_rdpi_DOY_Stage2_2024", 
+"plasticity_rdpi_DOY_Stage3_2024", "plasticity_rdpi_DOY_Stage6_2024", 
+"plasticity_rdpi_DOY_Stage7_2024",  
+"plasticity_rdpi_DOY_last_budset_2024", "plasticity_rdpi_growing_season_days_2024"
+)
+
+cbind(traits, plasts)
+
+################################################
+# Do trait values predict trait plasticity, suggesting trade-offs?
+# models
+################################################
+# reorder gardens by MAT
+tmp <- aggregate(dat$garden_MAT_2023, by = list(dat$MiniCG_Site_2023), mean)
+ord <- tmp$Group.1[order(tmp$x, decreasing = T)]
+dat$MiniCG_Site_2023 <- factor(dat$MiniCG_Site_2023, levels = ord)
+
+sites <- levels(dat$MiniCG_Site_2023)
+# remove UCM - height not measured
+sites <- sites[! sites == 'UCM']
+
+sites.mat <- dat$garden_MAT_2023[match(sites, dat$MiniCG_Site)]
+
+
+# to save results
+mods.mat <- list()
+
+# list to save summary plot for each trait with significant effects on fitness
+plots.summ <- list()
+
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  plast <- plasts[n]
+  
+  print(paste('Model for:', trait, 'and', plast))
+  
+  # mode;
+  mod <- lmer(paste0(trait, '~', plast,  ' + (1 | MiniCG_Site/block) + (1 | Genotype)'),
+              data = dat
+  )
+  
+  print(car::Anova(mod))
+  
+  p1 <- plot_model(mod, vline.color = "black", show.values = T, type = 'std', 
+                   title = paste('2023 Growth ~ ', trait, sep = ''))
+  plot(p1)
+  #plot_model(mod, type = 're')
+  
+  mods.mat[[n]] <- mod
+  names(mods.mat)[n] <- trait
+  
+  
+  #####################
+  # posthoc tests
+  # if trait significantly predicts plasticity in full model, test in each garden
+  mod.info <- Anova(mod)
+  # if any coefficients are significant, plot by garden
+  # need to change indexes if model is changed!
+  if(mod.info$`Pr(>Chisq)`[1] <= 0.05){
+    
+  # plot data for all sites
+  p2 <- ggplot(data = dat, aes_string(y = plast, x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+    geom_point(na.rm = TRUE) +
+    scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+    geom_smooth(color = 'black', lty=1, method = 'lm', formula = y ~ x, na.rm = TRUE) +
+    xlab(trait_names_df[trait, "trait_names"]) +
+    ylab( paste('Plasticity (RDPI) of', trait_names_df[trait, "trait_names"])) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) #+
+  #facet_wrap(~ MiniCG_Site_2023, drop = T, scales = 'free')
+  
+  plot(p2)
+  
+   p3 <- ggplot(data = dat, aes_string(y = plast, x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+    geom_point(na.rm = TRUE) +
+    scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+    geom_smooth(aes(group = MiniCG_Site_2023), lty=1, method = 'lm', formula = y ~ x, na.rm = TRUE) +
+    xlab(trait_names_df[trait, "trait_names"]) +
+    ylab( paste('Plasticity (RDPI) of', trait_names_df[trait, "trait_names"])) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12))
+    
+# list to save plots for each site
+    plots.sub <- list()
+    
+    
+    # dataframe to save outputs from posthoc tests
+    df.posthoc <- as.data.frame(matrix(ncol = 4, nrow = length(sites)))
+    rownames(df.posthoc) <- sites
+    colnames(df.posthoc) <- c('mat', 'slope', 'cor', 'pval')
+    df.posthoc$mat <- sites.mat
+    
+    for(s in 1:length(sites)){
+      
+      site <- sites[s]
+      dat.sub <- subset(dat, MiniCG_Site_2023 == site)
+      # skip if site is missing data
+      if(sum(!is.na(dat.sub[,trait])) > 10){
+        mod.sub <- lmer(paste0(trait, '~', plast,  ' + (1 | block) + (1 | Genotype)'),
+              data = dat.sub
+  )
+        # get pval for trait
+        mod.sub.info <- Anova(mod.sub)
+        df.posthoc[site, 'pval'] <- mod.sub.info$`Pr(>Chisq)`[1]
+        
+        # get slopes from fixed effect of trait (effect of trait value on plasticity)
+        df.posthoc[site, 'slope'] <- fixef(mod.sub)[2]
+        
+        # get standardized effect, equivalent to correlation
+        eff.std <- effectsize::standardize_parameters(mod.sub)
+        df.posthoc[site, 'cor'] <- eff.std[2, 'Std_Coefficient'] # 2nd row has coefficient for plasticity effect
+        
+        # plot
+        p <- ggplot(data = dat.sub, aes_string(y = plast, x = trait, color = 'k2_tricho'), na.rm  = TRUE) +
+          geom_point(na.rm = TRUE) +
+          scale_color_gradient2(high = "darkolivegreen2", mid = "grey20", low = "dodgerblue2", midpoint = 0.5, name = 'P. trichocarpa\nancestry', guide = 'none') +
+          ggtitle(paste(site, '\n', trait, '\n', 'p = ', round(df.posthoc$pval[s], 3), sep = '')) +
+          geom_smooth(color = 'black', lty = ifelse(df.posthoc$pval[s] <= 0.05, 1,2), method = 'lm', formula = y ~x, na.rm = TRUE) +
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 12)) +
+          theme(axis.title.x = element_blank())
+        
+        #plot(p)
+        plots.sub[[s]] <- p
+        
+      }
+    }
+
+    # pvals are adjusted for summary plot
+    df.posthoc$pvals.adj <- p.adjust(df.posthoc$pval, method = 'BH') 
+    
+    # plot panel with relationship for each garden
+    # remove empty plots
+    plots.sub <- plots.sub[lengths(plots.sub)>0]
+    # plot in grid
+    p1 <- grid.arrange(grobs = plots.sub, ncol = 4)
+    #plot(p1)
+    
+    # setup text showing significance
+    sig_text <- paste0('Trait ', pval_stars(mod.info[1, 'Pr(>Chisq)']))
+    
+    # wrap title
+    maintitle <- trait_names_df[trait, 'trait_names']
+    maintitle <- paste(strwrap(maintitle, width = 26), collapse = '\n')
+    
+    # plot slope of fitness relationship vs climate
+    p2 <- ggplot(df.posthoc, aes(x = mat, y = cor), na.rm  = TRUE) +
+      geom_point(size = 5, stroke = 2, shape = ifelse(df.posthoc$pvals.adj <= 0.05, 16, 1), aes(col = mat), na.rm = TRUE) +
+      scale_color_gradient2(high = "red2", mid = "grey", low = "blue2", midpoint = mean(range(sites.mat)), limits = range_mat, name = 'Garden MAT (°C)') +
+      geom_smooth(method = 'lm', col = 'black', na.rm = TRUE) +
+      geom_hline(yintercept = 0, lty = 2) +
+      ggtitle(maintitle,
+              subtitle = sig_text) +
+      xlab('Garden MAT') +
+      ylab('Correlation between Trait and Plasticity') +
+      geom_text_repel(label = rownames(df.posthoc), aes(x = mat, y = cor), box.padding = 0.5, min.segment.length = 1, size = 4) +
+        theme(plot.title = element_text(size = 15),
+        plot.subtitle = element_text(size = 10),
+        legend.position = 'none')
+    plot(p2)
+    
+    plots.summ[[n]] <- p2
+    names(plots.summ)[n] <- trait
+    
+    # add legend
+    leg_plot <- ggplot(df.posthoc, aes(x = mat, y = slope), na.rm  = TRUE) +
+      geom_point(aes(color = mat))+
+      scale_color_gradient2(high = "red2", mid = "grey", low = "blue2", midpoint = mean(range(sites.mat)), limits = range_mat, name = 'Garden MAT (°C)') +
+      theme(legend.position = 'right')
+    
+    legend <- cowplot::get_legend(leg_plot)
+    
+    
+  }
+}
+
+
+plots.summ <- plots.summ[lengths(plots.summ)>0]
+
+    
+# add legend to beginning of plot list
+
+plots2 <- plots.summ
+plots2[[length(plots.summ)+1]] <- legend
+
+p3 <- grid.arrange(grobs = plots2, ncol = 4)
+plot(p3)
+
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityTradeoffMAT2023.png', p3, height = 12, width = 14)
+#ggsave(file = 'results/fitness/fitnessEffects_summaryPlot_traitPlasticityTradeoffMAT_2023.pdf', p3, height = 12, width = 14)
+
+# rename plots list for later use
+plots.plast.mat.23 <- plots.summ
+
+
+```
+

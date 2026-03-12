@@ -1,0 +1,442 @@
+---
+title: "Calculate Plasticity Metrics"
+author: "Alayna Mead"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    toc: true
+    number_sections: true
+    highlight: rstudio
+---
+
+# Setup
+
+```{r setup}
+
+library(colorRamp2)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(lme4)
+
+# load common garden data
+load('data/clean/mini_garden_phenotypic_and_climate_data_2021-2024.Rdata')
+
+str(dat)
+
+# remove NA genotypes and genetic weirdos (possibly other species)
+dat <- dat[! is.na(dat$Genotype),]
+dat <- dat[! is.na(dat$k2_tricho),]
+
+# print session info, including package versions
+sessionInfo()
+
+```
+
+```{r markdown_settings}
+
+# markdown settings
+knitr::opts_chunk$set(fig.width = 12, fig.height = 8)
+
+```
+
+```{r setup_ggplot}
+
+# ggplot settings
+theme_set(theme_bw(base_size = 16))
+
+```
+
+# Functions to calculate plasticity
+
+Testing several functions from Valladares et al 2006:
+
+*RDPI*: Relative Distance Plasticity Index, averages pairwise differences for individuals of the same genotype in different environments
+
+*RDPI median*: same as RDPI but pairwise genotype differences are summarized using the median instead of mean
+
+*PPI*: Phenotypic Plasticity Index, (max - min)/max
+
+```{r functions}
+
+# input is a vector for trait measures of all individuals from one genotype (phenos), and same-length vector identifying the gardens those measures are from (gardens)
+
+calc_rdpi <- function(phenos, gardens){
+  
+  df <- data.frame(phenos = phenos, gardens = gardens)
+  
+  # remove NAs
+  df <- df[! is.na(df$phenos),]
+  
+  # for each row (tree), calculate relative distance values with all other trees except the one in the same garden (only across-environment comparisons)
+  # only do this if there is >1 measure
+  if(nrow(df) > 1){
+    for(r in 1:nrow(df)){
+    
+    # rows to compare - exclude any row  in same garden
+    compare <- df[df$gardens != df[r, 'gardens'],]
+    
+    # get phenotype value for this tree
+    val1 <- df[r, 'phenos']
+    
+    # calculate values for each pair of phenotypes
+    # (or relative distance)
+    rel.dist <- vector()
+    
+    # loop through each pair for comparison
+    for(n in 1:nrow(compare)){
+      
+      val2 <- compare[n, 'phenos']
+      
+      p.diff <- abs(val1-val2)
+      p.sum <- val1+val2
+      
+      relDistN <- p.diff/p.sum
+      
+      #skip pairs that produce NaN values - happens when both heights are 0
+      if(! is.nan(p.diff/p.sum)){
+        rel.dist <- append(rel.dist, relDistN)
+      }
+    }
+    }
+    
+  # calculate relative plasticity index by dividing by number of values
+  return(sum(rel.dist)/length(rel.dist))
+  } else { # if there is only one measure, return NA
+    return(NA)
+  }
+  
+}
+  
+
+# summarize with medians instead of means
+
+calc_rdpi_med <- function(phenos, gardens){
+  
+  df <- data.frame(phenos = phenos, gardens = gardens)
+  
+  # remove NAs
+  df <- df[! is.na(df$phenos),]
+  
+  # for each row (tree), calculate relative distance values with all other trees except the one in the same garden (only across-environment comparisons)
+  # only do this if there is >1 measure
+  if(nrow(df) > 1){
+    for(r in 1:nrow(df)){
+    
+    # rows to compare - exclude any row  in same garden
+    compare <- df[df$gardens != df[r, 'gardens'],]
+    
+    # get phenotype value for this tree
+    val1 <- df[r, 'phenos']
+    
+    # calculate values for each pair of phenotypes
+    # (or relative distance)
+    rel.dist <- vector()
+    
+    # loop through each pair for comparison
+    for(n in 1:nrow(compare)){
+      
+      val2 <- compare[n, 'phenos']
+      
+      p.diff <- abs(val1-val2)
+      p.sum <- val1+val2
+      
+      relDistN <- p.diff/p.sum
+      
+      #skip pairs that produce NaN values - happens when both heights are 0
+      if(! is.nan(p.diff/p.sum)){
+        rel.dist <- append(rel.dist, relDistN)
+      }
+    }
+    }
+    
+  # calculate relative plasticity index by dividing by number of values
+  return(median(rel.dist))
+  } else { # if there is only one measure, return NA
+    return(NA)
+  }
+  
+}
+
+# phenoypic plasticity index
+# instead of using genotype-garden means as in Valladares 2006, just use all values
+# input is a vector for trait measures of all individuals from one genotype (phenos), garden IDs are not needed
+
+calc_ppi <- function(phenos){
+  
+  phenos <- phenos[! is.na(phenos)]
+  if(length(phenos) > 1){
+    max <- max(phenos, na.rm = T)
+    min <- min(phenos, na.rm = T)
+    return(max-min)/max
+  } else {
+    return(NA)
+  }
+}
+
+```
+
+# Calculate plasticity by genotype
+
+## Get genotype info, setup for saving plasticity to same dataframe
+
+```{r get_genotype_info}
+
+# make a dataframe with genotype info (will add plasticity metrics to this)
+# I originally used these variables to plot their relationship with plasticity, but that is now in "plasticity_vs_ancestry_and_climate_correlations.Rmd" script
+
+genos <- levels(dat$Genotype)
+vars <- c("provenance_latitude", "provenance_longitude", "provenance_MAT", "provenance_MWMT", "provenance_MCMT", "provenance_TD", "provenance_MAP", "provenance_MSP", "provenance_AHM", "provenance_SHM", "provenance_DD_0", "provenance_DD5", "provenance_DD_18", "provenance_DD18", "provenance_NFFD", "provenance_bFFP", "provenance_eFFP", "provenance_FFP", "provenance_PAS", "provenance_EMT", "provenance_EXT", "provenance_MAR", "provenance_Eref", "provenance_CMD", "provenance_RH", "ID", "k2_balsam", "k2_tricho", "k3_balsam", "k3_coastal_tricho", "k3_interior_tricho", "genetic_PC1", "genetic_PC2", "genetic_PC3", "genetic_PC4", "genetic_PC5", "genetic_PC6","provenance_climate_PC1", "provenance_climate_PC2", "provenance_climate_PC3", "provenance_climate_PC4", "provenance_climate_PC5", "provenance_climate_PC6", "provenance_climate_PC7", "provenance_climate_PC8", "provenance_climate_PC9", "color_Pt", "color_k3", "interspecific_heterozygosity", "heterozygosity")
+
+geno.info <- as.data.frame(matrix(nrow = length(genos), ncol = length(vars)))
+rownames(geno.info) <- genos
+colnames(geno.info) <- vars
+
+
+# get genotype info
+for(g in 1:length(genos)){
+  
+  geno <- genos[g]
+  
+  for(v in 1:length(vars)){
+    
+    var <- vars[v]
+    
+    # get first row for this genotype and extract variable
+    geno.info[g, v] <- dat[match(geno, dat$Genotype), var]
+    
+  }
+}
+
+# add genotype
+geno.info <- cbind.data.frame(genos, geno.info)
+colnames(geno.info)[colnames(geno.info) == 'genos'] <- 'genotype'
+
+head(geno.info)
+
+
+
+```
+
+## Transform trait data
+
+If needed, transform trait data to meet assumptions of normality
+
+```{r transform_trait}
+
+# RDPI needs normally distributed data
+# plot distribution of each trait
+
+traits <- c("GrowthIncrement_2023", "DOY_Stage2_2023", "DOY_Stage3_2023", "DOY_last_budset_2023", "stage7_presence_2023", "growing_season_days_2023", "DOY_Stage2_2024", "DOY_Stage3_2024", "DOY_Stage6_2023","DOY_Stage6_2024", "DOY_last_budset_2024", "stage7_presence_2024", "growing_season_days_2024", "licor_gsw", "licor_gbw","licor_PhiPS2", "licor_ETR", "licor_Fs", "licor_Fm.", "leaf_thickness_avg_mm_2023", "LMA_g_m2_2023", "leaf_mass_g_2023", "leaf_area_cm2_2023", "lower_stomata_count", "lower_stomata_pore_length_mean_um", "upper_stomata_presence", "upper_stomata_count", "upper_stomata_pore_length_mean_um",  "upper_stomata_density_mm2", "lower_stomata_density_mm2", "stomata_density_both", "upper_stomata_density_over_total_density", "stomata_ratio")
+
+
+par(mfrow = c(4,8))
+for(n in 1:length(traits)){
+  trait <- traits[n]
+  hist(dat[,trait], main = trait, breaks = 'fd')
+  
+}
+
+to_log <- c("DOY_Stage6_2023", "DOY_Stage6_2024", "leaf_mass_g_2023", "leaf_area_cm2_2023")
+
+par(mfrow = c(1,2))
+for(n in 1:length(to_log)){
+  
+  trait <- to_log[[n]]
+  newcol <- paste(trait, 'log', sep = '_')
+  dat[,newcol] <- log(dat[,trait])
+  
+  # plot comparison
+  hist(dat[,trait], main = trait, breaks = 'fd')
+  hist(dat[,newcol], main = 'log', breaks = 'fd')
+  
+}
+
+# for traits where zero values are possible, need to add offset
+to_log <- c("GrowthIncrement_2023",  "upper_stomata_count",  "upper_stomata_density_mm2",  "upper_stomata_density_over_total_density", "stomata_ratio")
+
+par(mfrow = c(1,2))
+for(n in 1:length(to_log)){
+  
+  trait <- to_log[[n]]
+  newcol <- paste(trait, 'log', sep = '_')
+  dat[,newcol] <- log(dat[,trait] + 0.01)
+  
+  # plot comparison
+  hist(dat[,trait], main = trait, breaks = 'fd')
+  hist(dat[,newcol], main = 'log', breaks = 'fd')
+  
+}
+
+# new list of traits
+traits <- c("GrowthIncrement_2023_log", "DOY_Stage2_2023", "DOY_Stage3_2023", "DOY_last_budset_2023", "stage7_presence_2023", "growing_season_days_2023", "DOY_Stage2_2024", "DOY_Stage3_2024", "DOY_Stage6_2024", "DOY_last_budset_2024", "stage7_presence_2024", "growing_season_days_2024", "licor_gsw", "licor_gbw","licor_PhiPS2", "licor_ETR", "licor_Fs", "licor_Fm.", "leaf_thickness_avg_mm_2023", "LMA_g_m2_2023", "leaf_mass_g_2023_log", "leaf_area_cm2_2023_log", "lower_stomata_count", "lower_stomata_pore_length_mean_um", "upper_stomata_presence", "upper_stomata_count_log", "upper_stomata_pore_length_mean_um",  "upper_stomata_density_mm2_log", "lower_stomata_density_mm2", "stomata_density_both", "upper_stomata_density_over_total_density_log", "stomata_ratio_log")
+
+par(mfrow = c(4,8))
+for(n in 1:length(traits)){
+  trait <- traits[n]
+  hist(dat[,trait], main = trait, breaks = 'fd')
+  
+}
+
+# plot by garden
+
+par(mfrow = c(3,4))
+for(n in 1:length(traits)){
+  
+  trait <- traits[n]
+  boxplot(dat[,trait] ~ factor(dat$MiniCG_Site_2023, exclude = c('OLLU', 'LOCK', 'NDSU', 'NWMO')),
+          las = 2, main = trait, xlab = '', ylab = trait)
+  
+}
+
+```
+
+## Calculate Plasticity
+
+Calculate RDPI, PPI, and summary metrics
+
+```{r calc_plasticity_by_genotype}
+
+# loop through genotypes and get info for each of them
+
+# calculate plasticity for traits
+
+traits <- c("GrowthIncrement_2023_log", "DOY_Stage2_2023", "DOY_Stage3_2023", "DOY_Stage6_2023", "DOY_last_budset_2023", "stage7_presence_2023", "growing_season_days_2023", "DOY_Stage2_2024", "DOY_Stage3_2024", "DOY_Stage6_2024", "DOY_Stage7_2023", "DOY_Stage7_2024", "DOY_last_budset_2024", "stage7_presence_2024", "growing_season_days_2024", "licor_gsw", "licor_gbw","licor_PhiPS2", "licor_ETR", "licor_Fs", "licor_Fm.", "leaf_thickness_avg_mm_2023", "LMA_g_m2_2023", "leaf_mass_g_2023_log", "leaf_area_cm2_2023_log", "lower_stomata_count", "lower_stomata_pore_length_mean_um", "upper_stomata_presence", "upper_stomata_count_log", "upper_stomata_pore_length_mean_um",  "upper_stomata_density_mm2_log", "lower_stomata_density_mm2", "stomata_density_both", "upper_stomata_density_over_total_density_log", "stomata_ratio_log")
+
+plast <- list()
+
+for(t in 1:length(traits)){
+  
+  pheno_colname <- traits[t]
+  
+  # get values for trait
+  df <- as.data.frame(matrix(nrow = length(genos), ncol = 7))
+  #rownames(df) <- paste('geno_', genos, sep = '') 
+  rownames(df) <- genos
+  colnames(df) <- c('rdpi', 'ppi', 'min', 'max', 'median', 'avg', 'sd')
+  
+  for(n in 1:length(genos)){
+    
+    geno <- genos[n]
+    # get phenotype values
+    sub <- dat[dat$Genotype == geno,]
+    
+    # get RDPI
+    
+    # todo
+    # only calculate RDPI if trees exist in at least X sites
+    tmp <- cbind(sub[,pheno_colname], as.character(sub$MiniCG_Site))
+    if(length(unique(tmp[complete.cases(tmp), 2])) > 3){
+      rdpi <- calc_rdpi(sub[,pheno_colname], sub$MiniCG_Site)
+      df[n, 'rdpi'] <- rdpi
+    }
+
+    
+    # get other info
+    df[n, 'ppi'] <- calc_ppi(sub[,pheno_colname])
+    df[n, 'min'] <- min(sub[,pheno_colname], na.rm = T)
+    df[n, 'max'] <- max(sub[,pheno_colname], na.rm = T)
+    df[n, 'median'] <- median(sub[,pheno_colname], na.rm = T)
+    df[n, 'avg'] <- mean(sub[,pheno_colname], na.rm = T)
+    df[n, 'sd'] <- sd(sub[,pheno_colname], na.rm = T)
+    
+    # replace Inf values in rdpi (caused by dividing by zero)
+    df$rdpi[df$rdpi == Inf] <- NA
+  }
+  
+  # save to list
+  plast[[t]] <- df
+  
+  # also add rdpi and ppi as column 
+  geno.info[,paste('plasticity_rdpi_', pheno_colname, sep = '')] <- df$rdpi
+  geno.info[,paste('plasticity_ppi_', pheno_colname, sep = '')] <- df$ppi
+  
+  print(pheno_colname)
+}
+
+names(plast) <- traits
+
+```
+
+## Save
+
+```{r save_plasticity}
+
+write.csv(geno.info, row.names= F, file = 'data/clean/genotypePlasticityRDPI_2023-2024.csv')
+
+# rename then save as R object
+rdpi <- geno.info
+save(rdpi, file = 'data/clean/genotypePlasticityRDPI_2023-2024.Rdata')
+
+```
+
+
+# Compare plasticity metrics
+
+Check how different plasticity metrics are
+
+RDPI and PPI are fairly similar for most traits.
+
+
+```{r compare_plasticity, fig.width = 16, fig.height = 16}
+
+
+plots <- list()
+
+# does RDPI correlate with SD?
+# mostly yes
+
+for(n in 1:length(plast)){
+  
+  trait <- plast[[n]]
+  # put into a df
+  df <- data.frame(geno.info, trait)
+  
+  # calculate correlation
+  cor <- cor.test(trait$rdpi, trait$sd)
+  
+  plots[[n]] <- ggplot(df, aes(x = rdpi, y = sd)) +
+    geom_point(color = df$color_Pt, cex = 3, na.rm = TRUE) +
+    ggtitle( paste(names(plast)[n], '\nR = ', round(cor$estimate, 2), '\np = ', round(cor$p.value, 3), sep = '')) +
+    xlab('Plasticity (RDPI)') +
+    ylab('SD')+
+    #geom_smooth(method="loess", se=TRUE, color = 'black') +
+    geom_smooth(method=lm, se=TRUE, na.rm = TRUE, color = 'black', lty = ifelse(cor$p.value <= 0.05, 1, 2)) +
+    theme(plot.title=element_text(size=10))
+  
+  
+}
+
+#ggplot(plots)
+grid.arrange(grobs = plots, ncol = 7)
+
+
+# does RDPI correlate with PPI?
+# mostly yes
+
+plots <- list()
+
+for(n in 1:length(plast)){
+  
+  trait <- plast[[n]]
+  
+  # put into a df
+  df <- data.frame(geno.info, trait)
+  
+  # calculate correlation
+  cor <- cor.test(trait$rdpi, trait$ppi)
+  
+  plots[[n]] <- ggplot(df, aes(x = rdpi, y = ppi)) +
+    geom_point(color = df$color_Pt, cex = 3, na.rm = TRUE) +
+    ggtitle( paste(names(plast)[n], '\nR = ', round(cor$estimate, 2), '\np = ', round(cor$p.value, 3), sep = '')) +
+    xlab('Plasticity (RDPI)') +
+    ylab('PPI')+
+    geom_smooth(method=lm, se=TRUE,  na.rm = TRUE, color = 'black', lty = ifelse(cor$p.value <= 0.05 & ! is.na(cor$p.value), 1, 2)) +
+    theme(plot.title=element_text(size=10))
+  
+}
+
+#ggplot(plots)
+grid.arrange(grobs = plots, ncol = 7)
+
+```
